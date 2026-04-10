@@ -1,8 +1,11 @@
 """
-Compute the time offset between two audio recordings via cross-correlation.
+Compute the time offset between two audio recordings via cross-correlation
+of onset strength envelopes.
 
-Both recordings are assumed to contain the same source audio (e.g. a music
-performance captured simultaneously by a camera mic and an external recorder).
+Using envelopes instead of raw samples makes the algorithm robust to
+codec differences (e.g. iPhone AAC mic vs Zoom WAV line-in): both recordings
+share the same transient events (speech starts, hand claps, instrument hits)
+regardless of frequency response or compression.
 """
 
 import numpy as np
@@ -33,40 +36,47 @@ def compute_offset(ref_audio_path: str, ext_audio_path: str) -> tuple[float, flo
     print(f"[sync] ref audio:  {len(ref)} samples @ {ref_sr} Hz  ({len(ref)/ref_sr:.2f}s)")
     print(f"[sync] ext audio:  {len(ext)} samples @ {ext_sr} Hz  ({len(ext)/ext_sr:.2f}s)")
 
-    # Normalize to zero-mean, unit variance so amplitude differences don't
-    # affect the correlation magnitude.
-    ref = _normalize(ref)
-    ext = _normalize(ext)
+    # Compute onset strength envelopes. These capture the temporal pattern of
+    # energy bursts (transients) and are invariant to timbre, EQ, and codec.
+    # hop_length=512 at 16kHz → ~32ms per frame, accurate enough for sync.
+    hop = 512
+    ref_env = librosa.onset.onset_strength(y=ref, sr=SAMPLE_RATE, hop_length=hop)
+    ext_env = librosa.onset.onset_strength(y=ext, sr=SAMPLE_RATE, hop_length=hop)
 
-    corr = correlate(ref, ext, mode="full", method="fft")
+    print(f"[sync] ref envelope: {len(ref_env)} frames")
+    print(f"[sync] ext envelope: {len(ext_env)} frames")
 
-    n_ref = len(ref)
-    n_ext = len(ext)
+    ref_env = _normalize(ref_env)
+    ext_env = _normalize(ext_env)
+
+    corr = correlate(ref_env, ext_env, mode="full", method="fft")
+
+    n_ref = len(ref_env)
+    n_ext = len(ext_env)
     lags = np.arange(-(n_ext - 1), n_ref)
 
-    # Number of overlapping samples at each lag — used to normalize the
-    # correlation into a per-sample correlation coefficient (≈ Pearson r).
+    # Normalize by overlap length to make the score comparable across lags.
     overlap = np.maximum(
         np.minimum(n_ref, lags + n_ext) - np.maximum(0, lags),
         1,
     )
+    corr_per_frame = corr / overlap
 
-    corr_per_sample = corr / overlap
+    peak_idx = np.argmax(np.abs(corr_per_frame))
+    # Convert frame lag → seconds
+    offset_seconds = float(lags[peak_idx] * hop / SAMPLE_RATE)
+    confidence = float(min(1.0, abs(corr_per_frame[peak_idx])))
 
-    peak_idx = np.argmax(np.abs(corr_per_sample))
-    offset_seconds = float(lags[peak_idx] / SAMPLE_RATE)
-    confidence = float(min(1.0, abs(corr_per_sample[peak_idx])))
-
-    print(f"[sync] peak correlation value: {abs(corr_per_sample[peak_idx]):.4f}")
-    print(f"[sync] confidence:             {confidence:.4f}")
-    print(f"[sync] offset:                 {offset_seconds:+.4f}s")
+    print(f"[sync] peak correlation: {abs(corr_per_frame[peak_idx]):.4f}")
+    print(f"[sync] confidence:       {confidence:.4f}")
+    print(f"[sync] offset:           {offset_seconds:+.4f}s")
 
     return offset_seconds, confidence
 
 
-def _normalize(audio: np.ndarray) -> np.ndarray:
-    audio = audio - audio.mean()
-    std = audio.std()
+def _normalize(a: np.ndarray) -> np.ndarray:
+    a = a - a.mean()
+    std = a.std()
     if std > 1e-8:
-        audio = audio / std
-    return audio
+        a = a / std
+    return a
