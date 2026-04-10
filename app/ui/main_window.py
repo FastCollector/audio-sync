@@ -20,6 +20,7 @@ from app.core.length_checker import MismatchType, check_lengths
 from app.core.sync_engine import compute_offset
 from app.ui.export_panel import ExportPanel
 from app.ui.import_panel import ImportPanel
+from app.ui.preview_panel import PreviewPanel
 
 CONFIDENCE_THRESHOLD = 0.5
 
@@ -53,14 +54,16 @@ class TaskThread(QThread):
 class MainWindow(QMainWindow):
     def __init__(self) -> None:
         super().__init__()
-        self.setWindowTitle("audio-sync — Phase 2")
+        self.setWindowTitle("audio-sync — Phase 3")
 
         self.import_panel = ImportPanel()
+        self.preview_panel = PreviewPanel()
         self.export_panel = ExportPanel()
         self.status_label = QLabel("Ready")
 
         layout = QVBoxLayout()
         layout.addWidget(self.import_panel)
+        layout.addWidget(self.preview_panel)
         layout.addWidget(self.export_panel)
         layout.addWidget(self.status_label)
 
@@ -94,6 +97,7 @@ class MainWindow(QMainWindow):
         self.import_panel.sync_button.setEnabled(False)
         self.export_panel.export_button.setEnabled(False)
         self.import_panel.clear_sync_result()
+        self.preview_panel.clear()
         self._sync_result = None
 
         def task() -> SyncResult:
@@ -181,6 +185,7 @@ class MainWindow(QMainWindow):
                 self.status_label.setText("Sync canceled due to low confidence")
                 self.import_panel.clear_sync_result()
                 self._sync_result = None
+                self.preview_panel.clear()
                 self.export_panel.export_button.setEnabled(False)
                 return
 
@@ -218,6 +223,7 @@ class MainWindow(QMainWindow):
                 self.status_label.setText("Sync canceled")
                 self.import_panel.clear_sync_result()
                 self._sync_result = None
+                self.preview_panel.clear()
                 self.export_panel.export_button.setEnabled(False)
                 return
             result.trim_video_end = value
@@ -225,6 +231,9 @@ class MainWindow(QMainWindow):
         self._sync_result = result
         self.export_panel.export_button.setEnabled(True)
         self.import_panel.set_sync_result(result.offset, result.confidence)
+        self.preview_panel.configure(
+            self.import_panel.video_path(), self.import_panel.audio_path(), result.offset
+        )
         self.status_label.setText("Sync complete. Ready to export.")
 
     def _handle_export_success(self, _result: object) -> None:
