@@ -1,11 +1,12 @@
 """Extract audio from a video file using the bundled FFmpeg binary."""
 
-import re
-import subprocess
-import tempfile
-import os
+from __future__ import annotations
 
-import imageio_ffmpeg
+import os
+import re
+import tempfile
+
+from app.core.ffmpeg_utils import get_ffmpeg_executable, probe_media, run_ffmpeg
 
 
 def extract_audio(video_path: str) -> tuple[str, float]:
@@ -16,13 +17,13 @@ def extract_audio(video_path: str) -> tuple[str, float]:
         (wav_path, video_duration_seconds)
         Caller is responsible for deleting the temp WAV file.
     """
-    ffmpeg = imageio_ffmpeg.get_ffmpeg_exe()
+    ffmpeg = get_ffmpeg_executable()
     video_duration = _get_duration(ffmpeg, video_path)
 
     tmp = tempfile.NamedTemporaryFile(suffix=".wav", delete=False)
     tmp.close()
 
-    subprocess.run(
+    run_ffmpeg(
         [
             ffmpeg, "-y", "-i", video_path,
             "-vn",          # no video
@@ -30,8 +31,6 @@ def extract_audio(video_path: str) -> tuple[str, float]:
             "-ar", "16000", # 16 kHz (sufficient for sync detection)
             tmp.name,
         ],
-        check=True,
-        capture_output=True,
     )
 
     return tmp.name, video_duration
@@ -39,7 +38,8 @@ def extract_audio(video_path: str) -> tuple[str, float]:
 
 def _get_duration(ffmpeg: str, path: str) -> float:
     """Parse media duration from ffmpeg -i stderr output."""
-    result = subprocess.run([ffmpeg, "-i", path], capture_output=True, text=True)
+    result = probe_media([ffmpeg, "-i", path])
+
     match = re.search(r"Duration:\s*(\d+):(\d+):(\d+\.?\d*)", result.stderr)
     if not match:
         raise ValueError(f"Could not determine duration of: {path}")

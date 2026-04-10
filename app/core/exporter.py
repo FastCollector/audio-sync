@@ -8,9 +8,8 @@ Audio B:               encoded to AAC, positioned at the computed offset.
 """
 
 import re
-import subprocess
 
-import imageio_ffmpeg
+from app.core.ffmpeg_utils import get_ffmpeg_executable, probe_media, run_ffmpeg
 
 
 def export(
@@ -31,7 +30,7 @@ def export(
                         (measured from the start of the audio B file, before offset).
         trim_video_end: If set, trim the output to this duration in seconds.
     """
-    ffmpeg = imageio_ffmpeg.get_ffmpeg_exe()
+    ffmpeg = get_ffmpeg_executable()
     n_orig_audio = _count_audio_streams(ffmpeg, video_path)
     audio_filter = _build_audio_b_filter(offset, trim_audio_end)
 
@@ -56,7 +55,7 @@ def export(
         output_path,
     ]
 
-    subprocess.run(cmd, check=True, capture_output=True)
+    run_ffmpeg(cmd)
 
 
 # ---------------------------------------------------------------------------
@@ -93,5 +92,5 @@ def _build_audio_b_filter(offset: float, trim_audio_end: float | None) -> str:
 
 
 def _count_audio_streams(ffmpeg: str, video_path: str) -> int:
-    result = subprocess.run([ffmpeg, "-i", video_path], capture_output=True, text=True)
+    result = probe_media([ffmpeg, "-i", video_path])
     return len(re.findall(r"Stream #0:\d+.*?Audio:", result.stderr))
