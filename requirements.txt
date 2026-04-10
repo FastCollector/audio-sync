@@ -1,0 +1,7 @@
+imageio-ffmpeg
+librosa
+soundfile
+scipy
+numpy
+PySide6
+pyinstaller
