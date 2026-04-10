@@ -6,7 +6,7 @@ from dataclasses import dataclass
 import soundfile as sf
 from PySide6.QtCore import QThread, Signal
 from PySide6.QtWidgets import (
-    QInputDialog,
+    QDialog,
     QLabel,
     QMainWindow,
     QMessageBox,
@@ -21,6 +21,7 @@ from app.core.sync_engine import compute_offset
 from app.ui.export_panel import ExportPanel
 from app.ui.import_panel import ImportPanel
 from app.ui.preview_panel import PreviewPanel
+from app.ui.trim_dialog import TrimDialog
 
 CONFIDENCE_THRESHOLD = 0.5
 
@@ -212,24 +213,20 @@ class MainWindow(QMainWindow):
                 )
 
         if result.trim_video_end is not None:
-            default_end = max(0.0, result.trim_video_end)
-            value, ok = QInputDialog.getDouble(
-                self,
-                "Video Overflow",
-                "Video extends beyond aligned audio. Choose video out-point (seconds):",
-                value=default_end,
-                minValue=0.0,
-                maxValue=result.video_duration,
-                decimals=3,
+            dialog = TrimDialog(
+                self.import_panel.video_path(),
+                result.video_duration,
+                result.trim_video_end,
+                parent=self,
             )
-            if not ok:
+            if dialog.exec() != QDialog.Accepted:
                 self.status_label.setText("Sync canceled")
                 self.import_panel.clear_sync_result()
                 self._sync_result = None
                 self.preview_panel.clear()
                 self.export_panel.export_button.setEnabled(False)
                 return
-            result.trim_video_end = value
+            result.trim_video_end = dialog.trim_seconds()
 
         self._sync_result = result
         self.export_panel.export_button.setEnabled(True)
