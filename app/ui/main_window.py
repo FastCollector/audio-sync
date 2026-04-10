@@ -54,7 +54,7 @@ class TaskThread(QThread):
 class MainWindow(QMainWindow):
     def __init__(self) -> None:
         super().__init__()
-        self.setWindowTitle("audio-sync — Phase 3")
+        self.setWindowTitle("audio-sync — Phase 4")
 
         self.import_panel = ImportPanel()
         self.preview_panel = PreviewPanel()
@@ -72,6 +72,7 @@ class MainWindow(QMainWindow):
         self.setCentralWidget(container)
 
         self.import_panel.sync_requested.connect(self._on_sync_requested)
+        self.import_panel.import_error.connect(self._on_import_error)
         self.export_panel.export_requested.connect(self._on_export_requested)
 
         self._sync_result: SyncResult | None = None
@@ -82,7 +83,9 @@ class MainWindow(QMainWindow):
         audio_path = self.import_panel.audio_path()
 
         if not video_path or not audio_path:
-            QMessageBox.warning(self, "Missing Files", "Select both video and WAV first.")
+            QMessageBox.warning(
+                self, "Missing Files", "Select both video and audio B before syncing."
+            )
             return
 
         if not self.import_panel.is_supported_video(video_path):
@@ -90,7 +93,7 @@ class MainWindow(QMainWindow):
             return
 
         if not self.import_panel.is_supported_audio(audio_path):
-            QMessageBox.warning(self, "Invalid Audio", "Audio B must be a WAV file.")
+            QMessageBox.warning(self, "Invalid Audio", "Audio B must be WAV, MP3, or FLAC.")
             return
 
         self.status_label.setText("Syncing...")
@@ -249,3 +252,6 @@ class MainWindow(QMainWindow):
         self.export_panel.set_busy(False)
         self.status_label.setText("Operation failed")
         QMessageBox.critical(self, "Operation Failed", error)
+
+    def _on_import_error(self, message: str) -> None:
+        QMessageBox.warning(self, "Unsupported Drop", message)

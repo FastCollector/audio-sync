@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from pathlib import Path
 
-from PySide6.QtCore import Signal
+from PySide6.QtCore import Qt, Signal
 from PySide6.QtWidgets import (
     QFileDialog,
     QGridLayout,
@@ -17,14 +17,16 @@ from PySide6.QtWidgets import (
 
 
 VIDEO_EXTENSIONS = {".mp4", ".mov", ".mkv", ".avi"}
-WAV_EXTENSIONS = {".wav"}
+AUDIO_EXTENSIONS = {".wav", ".mp3", ".flac"}
 
 
 class ImportPanel(QGroupBox):
     sync_requested = Signal()
+    import_error = Signal(str)
 
     def __init__(self, parent: QWidget | None = None) -> None:
         super().__init__("Import", parent)
+        self.setAcceptDrops(True)
 
         self.video_path_edit = QLineEdit()
         self.video_path_edit.setReadOnly(True)
@@ -41,7 +43,7 @@ class ImportPanel(QGroupBox):
         video_btn = QPushButton("Choose Video")
         video_btn.clicked.connect(self._pick_video)
 
-        audio_btn = QPushButton("Choose WAV")
+        audio_btn = QPushButton("Choose Audio")
         audio_btn.clicked.connect(self._pick_audio)
 
         grid = QGridLayout()
@@ -94,10 +96,44 @@ class ImportPanel(QGroupBox):
             self,
             "Select External WAV",
             "",
-            "WAV Files (*.wav)",
+            "Audio Files (*.wav *.mp3 *.flac)",
         )
         if path:
             self.audio_path_edit.setText(path)
+
+    def dragEnterEvent(self, event) -> None:  # type: ignore[override]
+        if event.mimeData().hasUrls():
+            event.acceptProposedAction()
+        else:
+            event.ignore()
+
+    def dropEvent(self, event) -> None:  # type: ignore[override]
+        urls = event.mimeData().urls()
+        if not urls:
+            event.ignore()
+            return
+
+        imported_any = False
+        for url in urls:
+            if not url.isLocalFile():
+                continue
+            local_path = url.toLocalFile()
+            if self.is_supported_video(local_path) and not self.video_path():
+                self.video_path_edit.setText(local_path)
+                imported_any = True
+            elif self.is_supported_audio(local_path) and not self.audio_path():
+                self.audio_path_edit.setText(local_path)
+                imported_any = True
+
+        if not imported_any:
+            self.import_error.emit(
+                "Drop a supported video (.mp4/.mov/.mkv/.avi) or audio (.wav/.mp3/.flac) file."
+            )
+            event.ignore()
+            return
+
+        event.setDropAction(Qt.CopyAction)
+        event.accept()
 
     @staticmethod
     def is_supported_video(path: str) -> bool:
@@ -105,4 +141,4 @@ class ImportPanel(QGroupBox):
 
     @staticmethod
     def is_supported_audio(path: str) -> bool:
-        return Path(path).suffix.lower() in WAV_EXTENSIONS
+        return Path(path).suffix.lower() in AUDIO_EXTENSIONS

@@ -3,6 +3,7 @@ from __future__ import annotations
 from pathlib import Path
 
 from PySide6.QtCore import QSignalBlocker, Qt, QTimer, QUrl
+from PySide6.QtGui import QKeySequence, QShortcut
 from PySide6.QtMultimedia import QAudioOutput, QMediaPlayer
 from PySide6.QtMultimediaWidgets import QVideoWidget
 from PySide6.QtWidgets import (
@@ -66,6 +67,9 @@ class PreviewPanel(QGroupBox):
         )
 
         self.state_label = QLabel("Load files and run Sync to enable preview")
+        self.play_pause_shortcut = QShortcut(QKeySequence(Qt.Key_Space), self)
+        self.play_pause_shortcut.setContext(Qt.WidgetWithChildrenShortcut)
+        self.play_pause_shortcut.activated.connect(self._on_space_pressed)
 
         controls = QHBoxLayout()
         controls.addWidget(self.play_pause_btn)
@@ -137,6 +141,10 @@ class PreviewPanel(QGroupBox):
         self.video_player.play()
         self._sync_external_player(force=True)
         self._sync_timer.start()
+
+    def _on_space_pressed(self) -> None:
+        if self.play_pause_btn.isEnabled():
+            self.toggle_play_pause()
 
     def stop(self) -> None:
         self._sync_timer.stop()
