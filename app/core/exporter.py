@@ -92,5 +92,7 @@ def _build_audio_b_filter(offset: float, trim_audio_end: float | None) -> str:
 
 
 def _count_audio_streams(ffmpeg: str, video_path: str) -> int:
+    """Count decodable audio streams only (excludes 'Audio: none' e.g. APAC)."""
     result = probe_media([ffmpeg, "-i", video_path])
-    return len(re.findall(r"Stream #0:\d+.*?Audio:", result.stderr))
+    # Match lines like "Stream #0:1: Audio: aac" but NOT "Audio: none (apac)"
+    return len(re.findall(r"Stream #0:\d+.*?Audio: (?!none)", result.stderr))
