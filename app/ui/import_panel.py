@@ -103,7 +103,8 @@ class ImportPanel(QGroupBox):
 
     def dragEnterEvent(self, event) -> None:  # type: ignore[override]
         if event.mimeData().hasUrls():
-            event.acceptProposedAction()
+            event.setDropAction(Qt.CopyAction)  # never Move — don't let Explorer delete the source
+            event.accept()
         else:
             event.ignore()
 
