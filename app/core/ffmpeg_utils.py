@@ -46,7 +46,7 @@ def run_ffmpeg(cmd: list[str], *, text: bool = False) -> subprocess.CompletedPro
                 "Please choose a different file."
             ) from exc
 
-        details = stderr.splitlines()[-1].strip() if stderr.strip() else "Unknown FFmpeg error"
+        details = _best_ffmpeg_error_line(stderr)
         raise FFmpegError(f"FFmpeg failed: {details}") from exc
 
 
@@ -77,3 +77,24 @@ def _stderr_text(exc: subprocess.CalledProcessError) -> str:
     if isinstance(exc.stderr, bytes):
         return exc.stderr.decode("utf-8", errors="ignore")
     return exc.stderr or ""
+
+
+def _best_ffmpeg_error_line(stderr: str) -> str:
+    """Return the most actionable single-line FFmpeg error from stderr."""
+    if not stderr.strip():
+        return "Unknown FFmpeg error"
+
+    generic_lines = {
+        "error opening output files: invalid argument",
+        "conversion failed!",
+    }
+    for line in reversed(stderr.splitlines()):
+        cleaned = line.strip()
+        if not cleaned:
+            continue
+        if cleaned.lower() in generic_lines:
+            continue
+        return cleaned
+
+    # Fallback: all lines were generic; return the final one.
+    return stderr.splitlines()[-1].strip()

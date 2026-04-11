@@ -35,10 +35,18 @@ def export(
     n_orig_audio = _count_audio_streams(ffmpeg, video_path)
     audio_filter = _build_audio_b_filter(offset, trim_audio_end)
 
-    # Copy video; copy each original audio stream; encode audio B as AAC.
+    # Ensure output path has an extension so FFmpeg can determine the container.
+    out = _ensure_extension(output_path)
+
+    # Copy video. For MP4-family outputs, re-encode original audio tracks to AAC
+    # (PCM-in-MOV and some camera codecs cannot be stream-copied into MP4).
+    output_ext = Path(out).suffix.lower()
+    force_aac_for_original_audio = output_ext in {".mp4", ".m4v", ".ismv"}
+
+    # Original audio tracks + audio B codec selection.
     codec_args = ["-c:v", "copy"]
     for i in range(n_orig_audio):
-        codec_args += [f"-c:a:{i}", "copy"]
+        codec_args += [f"-c:a:{i}", "aac" if force_aac_for_original_audio else "copy"]
     codec_args += [f"-c:a:{n_orig_audio}", "aac"]
 
     trim_args = []
@@ -46,9 +54,6 @@ def export(
         trim_args += ["-ss", str(trim_video_start)]
     if trim_video_end is not None:
         trim_args += ["-to", str(trim_video_end)]
-
-    # Ensure output path has an extension so FFmpeg can determine the container.
-    out = _ensure_extension(output_path)
 
     cmd = [
         ffmpeg, "-y",
