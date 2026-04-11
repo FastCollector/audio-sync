@@ -8,6 +8,7 @@ Audio B:               encoded to AAC, positioned at the computed offset.
 """
 
 import re
+from pathlib import Path
 
 from app.core.ffmpeg_utils import get_ffmpeg_executable, probe_media, run_ffmpeg
 

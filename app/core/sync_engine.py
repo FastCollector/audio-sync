@@ -55,19 +55,34 @@ def compute_offset(ref_audio_path: str, ext_audio_path: str) -> tuple[float, flo
     n_ext = len(ext_env)
     lags = np.arange(-(n_ext - 1), n_ref)
 
-    # Normalize by overlap length to make the score comparable across lags.
-    overlap = np.maximum(
-        np.minimum(n_ref, lags + n_ext) - np.maximum(0, lags),
-        1,
-    )
-    corr_per_frame = corr / overlap
+    # Normalize by sqrt(n_ref * n_ext) — a constant factor derived from the
+    # expected total energy of two unit-variance signals.  This avoids the
+    # per-lag-overlap normalization which inflates edge lags (tiny overlap →
+    # tiny divisor → spuriously large per-frame value) and produces false
+    # high-confidence peaks when the signals barely overlap.
+    norm_factor = float(np.sqrt(n_ref * n_ext))
+    corr_norm = corr / norm_factor if norm_factor > 0 else corr
 
-    peak_idx = np.argmax(np.abs(corr_per_frame))
-    # Convert frame lag → seconds
+    abs_corr = np.abs(corr_norm)
+    peak_idx = np.argmax(abs_corr)
     offset_seconds = float(lags[peak_idx] * hop / SAMPLE_RATE)
-    confidence = float(min(1.0, abs(corr_per_frame[peak_idx])))
 
-    print(f"[sync] peak correlation: {abs(corr_per_frame[peak_idx]):.4f}")
+    # Confidence = peak-to-second-peak ratio.
+    # Mask out a window around the main peak (±1 second in frames) before
+    # finding the second peak.  For a true match the main peak is isolated
+    # and much larger than any secondary peak → ratio near 1.0.
+    # For random / unrelated signals peaks are roughly equal → ratio near 0.
+    mask_radius = int(SAMPLE_RATE / hop)  # 1 s worth of envelope frames
+    masked = abs_corr.copy()
+    lo = max(0, peak_idx - mask_radius)
+    hi = min(len(masked), peak_idx + mask_radius + 1)
+    masked[lo:hi] = 0.0
+    second_peak = float(masked.max()) if masked.max() > 0 else 1e-9
+    peak_val = float(abs_corr[peak_idx])
+    confidence = float(min(1.0, 1.0 - second_peak / peak_val)) if peak_val > 0 else 0.0
+
+    print(f"[sync] peak correlation: {peak_val:.4f}")
+    print(f"[sync] second peak:      {second_peak:.4f}")
     print(f"[sync] confidence:       {confidence:.4f}")
     print(f"[sync] offset:           {offset_seconds:+.4f}s")
 
