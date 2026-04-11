@@ -62,12 +62,25 @@ def compute_offset(ref_audio_path: str, ext_audio_path: str) -> tuple[float, flo
     )
     corr_per_frame = corr / overlap
 
-    peak_idx = np.argmax(np.abs(corr_per_frame))
-    # Convert frame lag → seconds
-    offset_seconds = float(lags[peak_idx] * hop / SAMPLE_RATE)
-    confidence = float(min(1.0, abs(corr_per_frame[peak_idx])))
+    abs_corr = np.abs(corr_per_frame)
+    peak_idx = np.argmax(abs_corr)
+    coarse_lag_samples = int(lags[peak_idx] * hop)
 
-    print(f"[sync] peak correlation: {abs(corr_per_frame[peak_idx]):.4f}")
+    refined_lag_samples, raw_peak = _refine_lag_with_waveform(
+        ref,
+        ext,
+        coarse_lag_samples,
+        search_radius_samples=int(0.15 * SAMPLE_RATE),
+    )
+
+    # Convert sample lag → seconds
+    offset_seconds = float(refined_lag_samples / SAMPLE_RATE)
+    onset_confidence = _compute_confidence(abs_corr, peak_idx)
+    raw_confidence = float(np.clip((raw_peak - 0.1) / 0.6, 0.0, 1.0))
+    confidence = float(np.clip(0.35 * onset_confidence + 0.65 * raw_confidence, 0.0, 1.0))
+
+    print(f"[sync] peak correlation: {abs_corr[peak_idx]:.4f}")
+    print(f"[sync] raw correlation:  {raw_peak:.4f}")
     print(f"[sync] confidence:       {confidence:.4f}")
     print(f"[sync] offset:           {offset_seconds:+.4f}s")
 
@@ -80,3 +93,71 @@ def _normalize(a: np.ndarray) -> np.ndarray:
     if std > 1e-8:
         a = a / std
     return a
+
+
+def _compute_confidence(abs_corr: np.ndarray, peak_idx: int) -> float:
+    """
+    Compute a robust confidence score from the correlation profile.
+
+    We combine:
+    - absolute peak strength
+    - peak-to-next-best ratio (outside a small neighborhood)
+    - robust z-score of peak versus global background (median/MAD)
+    """
+    peak = float(abs_corr[peak_idx])
+    if len(abs_corr) <= 3:
+        return float(np.clip(peak, 0.0, 1.0))
+
+    neighborhood = 3
+    mask = np.ones(len(abs_corr), dtype=bool)
+    start = max(0, peak_idx - neighborhood)
+    end = min(len(abs_corr), peak_idx + neighborhood + 1)
+    mask[start:end] = False
+    competitors = abs_corr[mask]
+    next_best = float(np.max(competitors)) if competitors.size else 0.0
+    peak_ratio = peak / (next_best + 1e-8)
+
+    median = float(np.median(abs_corr))
+    mad = float(np.median(np.abs(abs_corr - median))) + 1e-8
+    robust_z = (peak - median) / (1.4826 * mad)
+
+    peak_component = np.clip((peak - 0.2) / 0.8, 0.0, 1.0)
+    ratio_component = np.clip((peak_ratio - 1.1) / 1.9, 0.0, 1.0)
+    z_component = np.clip((robust_z - 2.0) / 8.0, 0.0, 1.0)
+
+    score = 0.25 * peak_component + 0.35 * ratio_component + 0.40 * z_component
+    return float(np.clip(score, 0.0, 1.0))
+
+
+def _refine_lag_with_waveform(
+    ref: np.ndarray,
+    ext: np.ndarray,
+    coarse_lag_samples: int,
+    search_radius_samples: int,
+) -> tuple[int, float]:
+    """Refine lag using raw waveform cross-correlation around the onset-based estimate."""
+    ref_n = _normalize(ref)
+    ext_n = _normalize(ext)
+
+    corr = correlate(ref_n, ext_n, mode="full", method="fft")
+    n_ref = len(ref_n)
+    n_ext = len(ext_n)
+    lags = np.arange(-(n_ext - 1), n_ref)
+
+    overlap = np.maximum(
+        np.minimum(n_ref, lags + n_ext) - np.maximum(0, lags),
+        1,
+    )
+    corr_per_sample = corr / overlap
+    abs_corr = np.abs(corr_per_sample)
+
+    mask = (lags >= coarse_lag_samples - search_radius_samples) & (
+        lags <= coarse_lag_samples + search_radius_samples
+    )
+    if not np.any(mask):
+        idx = int(np.argmax(abs_corr))
+        return int(lags[idx]), float(abs_corr[idx])
+
+    local_indices = np.where(mask)[0]
+    best_local = int(local_indices[np.argmax(abs_corr[mask])])
+    return int(lags[best_local]), float(abs_corr[best_local])

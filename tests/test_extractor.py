@@ -18,7 +18,7 @@ from app.core.extractor import extract_audio, _get_duration
 def test_get_duration_parses_standard_format(monkeypatch):
     stderr = "  Duration: 00:00:10.50, start: 0.000, bitrate: 768 kb/s"
     monkeypatch.setattr(
-        "app.core.extractor.subprocess.run",
+        "app.core.ffmpeg_utils.subprocess.run",
         lambda *a, **kw: subprocess.CompletedProcess([], 0, stdout="", stderr=stderr),
     )
     assert _get_duration("ffmpeg", "v.mp4") == 10.5
@@ -27,7 +27,7 @@ def test_get_duration_parses_standard_format(monkeypatch):
 def test_get_duration_parses_hours_minutes_seconds(monkeypatch):
     stderr = "ffmpeg version n6\n  Duration: 01:02:03.25, start: 0.000000, bitrate: 768 kb/s\n"
     monkeypatch.setattr(
-        "app.core.extractor.subprocess.run",
+        "app.core.ffmpeg_utils.subprocess.run",
         lambda *a, **kw: subprocess.CompletedProcess([], 0, stdout="", stderr=stderr),
     )
     assert _get_duration("ffmpeg", "v.mov") == 3723.25
@@ -41,8 +41,8 @@ def test_extract_audio_uses_mono_16khz_flags_and_returns_duration(monkeypatch):
         calls.append(list(cmd))
         return subprocess.CompletedProcess(cmd, 0, stdout="", stderr=stderr)
 
-    monkeypatch.setattr("app.core.extractor.imageio_ffmpeg.get_ffmpeg_exe", lambda: "ffmpeg")
-    monkeypatch.setattr("app.core.extractor.subprocess.run", fake_run)
+    monkeypatch.setattr("app.core.ffmpeg_utils.imageio_ffmpeg.get_ffmpeg_exe", lambda: "ffmpeg")
+    monkeypatch.setattr("app.core.ffmpeg_utils.subprocess.run", fake_run)
 
     wav_path, duration = extract_audio("video.mp4")
     try:

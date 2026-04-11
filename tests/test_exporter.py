@@ -31,8 +31,8 @@ def _patched_run(monkeypatch, audio_stream_count: int = 1):
         calls.append(list(cmd))
         return subprocess.CompletedProcess(cmd, 0, stdout="", stderr=audio_stderr)
 
-    monkeypatch.setattr("app.core.exporter.imageio_ffmpeg.get_ffmpeg_exe", lambda: "ffmpeg")
-    monkeypatch.setattr("app.core.exporter.subprocess.run", fake_run)
+    monkeypatch.setattr("app.core.ffmpeg_utils.imageio_ffmpeg.get_ffmpeg_exe", lambda: "ffmpeg")
+    monkeypatch.setattr("app.core.ffmpeg_utils.subprocess.run", fake_run)
     return calls
 
 
