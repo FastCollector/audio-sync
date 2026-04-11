@@ -33,6 +33,7 @@ class SyncResult:
     video_duration: float
     audio_duration: float
     trim_audio_end: float | None
+    trim_video_start: float | None
     trim_video_end: float | None
 
 
@@ -116,6 +117,7 @@ class MainWindow(QMainWindow):
             audio_duration = sf.info(audio_path).duration
             mismatch = check_lengths(video_duration, audio_duration, offset)
             trim_audio_end: float | None = None
+            trim_video_start: float | None = None
             trim_video_end: float | None = None
 
             if mismatch.mismatch_type == MismatchType.AUDIO_OVERFLOW:
@@ -129,6 +131,7 @@ class MainWindow(QMainWindow):
                 video_duration=video_duration,
                 audio_duration=audio_duration,
                 trim_audio_end=trim_audio_end,
+                trim_video_start=trim_video_start,
                 trim_video_end=trim_video_end,
             )
 
@@ -163,6 +166,7 @@ class MainWindow(QMainWindow):
                 sync_result.offset,
                 output_path,
                 trim_audio_end=sync_result.trim_audio_end,
+                trim_video_start=sync_result.trim_video_start,
                 trim_video_end=sync_result.trim_video_end,
             )
 
@@ -216,7 +220,8 @@ class MainWindow(QMainWindow):
             dialog = TrimDialog(
                 self.import_panel.video_path(),
                 result.video_duration,
-                result.trim_video_end,
+                default_start=0.0,
+                default_end=result.trim_video_end,
                 parent=self,
             )
             if dialog.exec() != QDialog.Accepted:
@@ -226,7 +231,8 @@ class MainWindow(QMainWindow):
                 self.preview_panel.clear()
                 self.export_panel.export_button.setEnabled(False)
                 return
-            result.trim_video_end = dialog.trim_seconds()
+            result.trim_video_start = dialog.start_seconds() or None
+            result.trim_video_end = dialog.end_seconds()
 
         self._sync_result = result
         self.export_panel.export_button.setEnabled(True)

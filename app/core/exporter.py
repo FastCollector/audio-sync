@@ -18,17 +18,17 @@ def export(
     offset: float,
     output_path: str,
     trim_audio_end: float | None = None,
+    trim_video_start: float | None = None,
     trim_video_end: float | None = None,
 ) -> None:
     """
     Mux video + all original audio tracks + audio B (at offset) into output.
 
     Args:
-        offset:        Seconds audio B starts relative to video start.
-                       Positive → audio B delayed; negative → audio B trimmed at start.
-        trim_audio_end: If set, keep only this many seconds of audio B content
-                        (measured from the start of the audio B file, before offset).
-        trim_video_end: If set, trim the output to this duration in seconds.
+        offset:           Seconds audio B starts relative to video start.
+        trim_audio_end:   Keep only this many seconds of audio B content.
+        trim_video_start: Output starts at this position in the video (seconds).
+        trim_video_end:   Output ends at this position in the video (seconds, absolute).
     """
     ffmpeg = get_ffmpeg_executable()
     n_orig_audio = _count_audio_streams(ffmpeg, video_path)
@@ -40,7 +40,14 @@ def export(
         codec_args += [f"-c:a:{i}", "copy"]
     codec_args += [f"-c:a:{n_orig_audio}", "aac"]
 
-    duration_args = ["-t", str(trim_video_end)] if trim_video_end is not None else []
+    trim_args = []
+    if trim_video_start is not None:
+        trim_args += ["-ss", str(trim_video_start)]
+    if trim_video_end is not None:
+        trim_args += ["-to", str(trim_video_end)]
+
+    # Ensure output path has an extension so FFmpeg can determine the container.
+    out = _ensure_extension(output_path)
 
     cmd = [
         ffmpeg, "-y",
@@ -51,8 +58,8 @@ def export(
         "-map", "0:a",      # all original audio tracks
         "-map", "[b_out]",  # audio B (filtered)
         *codec_args,
-        *duration_args,
-        output_path,
+        *trim_args,
+        out,
     ]
 
     run_ffmpeg(cmd)
@@ -89,6 +96,12 @@ def _build_audio_b_filter(offset: float, trim_audio_end: float | None) -> str:
                 f"asetpts=PTS-STARTPTS[b_out]"
             )
         return f"[1:a]atrim=start={start:.6f},asetpts=PTS-STARTPTS[b_out]"
+
+
+def _ensure_extension(path: str) -> str:
+    """Add .mp4 if the path has no extension, so FFmpeg knows the container format."""
+    p = Path(path)
+    return path if p.suffix else path + ".mp4"
 
 
 def _count_audio_streams(ffmpeg: str, video_path: str) -> int:
