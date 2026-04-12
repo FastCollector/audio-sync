@@ -28,7 +28,6 @@ class PreviewPanel(QGroupBox):
         self.offset_ms = 0
         self._trim_start_ms: int | None = None
         self._trim_end_ms: int | None = None
-        self._seek_on_play = False  # seek to trim_start on next play state
 
         self.video_widget = QVideoWidget()
         self.video_widget.setMinimumHeight(260)
@@ -146,6 +145,9 @@ class PreviewPanel(QGroupBox):
         self.video_player.setSource(QUrl.fromLocalFile(str(Path(video_path).resolve())))
         self.external_player.setSource(QUrl.fromLocalFile(str(Path(audio_path).resolve())))
 
+        if self._trim_start_ms is not None:
+            self.video_player.setPosition(self._trim_start_ms)
+
         self.state_label.setText(f"Preview ready (offset: {offset_seconds:+.3f}s)")
         self.set_enabled(True)
 
@@ -156,7 +158,6 @@ class PreviewPanel(QGroupBox):
         self.offset_ms = 0
         self._trim_start_ms = None
         self._trim_end_ms = None
-        self._seek_on_play = False
         self.video_player.setSource(QUrl())
         self.external_player.setSource(QUrl())
         self.state_label.setText("Load files and run Sync to enable preview")
@@ -179,12 +180,9 @@ class PreviewPanel(QGroupBox):
 
         start = self._trim_start_ms or 0
         pos = self.video_player.position()
-
-        # If outside trim range, flag that we need to seek once playing starts
-        if self._trim_start_ms is not None and pos < self._trim_start_ms:
-            self._seek_on_play = True
-        elif self._trim_end_ms is not None and pos >= self._trim_end_ms:
-            self._seek_on_play = True
+        end = self._trim_end_ms if self._trim_end_ms is not None else self.video_player.duration()
+        if pos < start or pos >= end:
+            self.video_player.setPosition(start)
 
         self.video_player.play()
         self._sync_external_player(force=True)
@@ -200,14 +198,20 @@ class PreviewPanel(QGroupBox):
         self.external_player.stop()
 
     def _seek_to(self, position_ms: int) -> None:
+        start = self._trim_start_ms or 0
+        end = self._trim_end_ms if self._trim_end_ms is not None else self.video_player.duration()
+        position_ms = max(start, min(end, position_ms))
         self.video_player.setPosition(position_ms)
         self._sync_external_player(force=True)
 
     def _on_duration_changed(self, duration_ms: int) -> None:
-        with QSignalBlocker(self.seek_slider):
-            self.seek_slider.setRange(0, max(duration_ms, 0))
         start = self._trim_start_ms or 0
         end = self._trim_end_ms if self._trim_end_ms is not None else max(duration_ms, 0)
+        with QSignalBlocker(self.seek_slider):
+            self.seek_slider.setRange(start, end)
+            self.seek_slider.setValue(start)
+        if self._trim_start_ms is not None:
+            self.video_player.setPosition(start)
         self._update_time_label(start, end)
 
     def _on_video_position_changed(self, position_ms: int) -> None:
@@ -216,8 +220,13 @@ class PreviewPanel(QGroupBox):
             if (self.video_player.playbackState() == QMediaPlayer.PlayingState
                     and position_ms >= self._trim_end_ms):
                 self.video_player.pause()
+                self.video_player.setPosition(self._trim_end_ms)
                 self.external_player.pause()
                 self._sync_timer.stop()
+                position_ms = self._trim_end_ms
+
+        if self._trim_start_ms is not None and position_ms < self._trim_start_ms:
+            position_ms = self._trim_start_ms
 
         if not self.seek_slider.isSliderDown():
             with QSignalBlocker(self.seek_slider):
@@ -230,11 +239,6 @@ class PreviewPanel(QGroupBox):
         if state == QMediaPlayer.PlayingState:
             self.play_pause_btn.setText("Pause")
             self._sync_timer.start()
-            # Seek to trim start now that player is in Playing state
-            if self._seek_on_play:
-                self._seek_on_play = False
-                start = self._trim_start_ms or 0
-                self.video_player.setPosition(start)
             return
 
         self.play_pause_btn.setText("Play")
