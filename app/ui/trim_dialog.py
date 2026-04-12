@@ -113,7 +113,7 @@ class TrimTimeline(QWidget):
             self.setCursor(Qt.SizeHorCursor)
 
     def mouseReleaseEvent(self, event) -> None:  # type: ignore[override]
-        if self._dragging:
+        if self._dragging in ("start", "end"):
             self.handle_released.emit(self._last_t)
         self._dragging = None
 
