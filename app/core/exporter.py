@@ -59,10 +59,17 @@ def export(
     )
     filter_complex = ";".join(filter_parts)
 
-    # All audio streams re-encoded to AAC (volume filter prevents stream copy).
+    out = _ensure_extension(output_path)
+    output_ext = Path(out).suffix.lower()
+    # MP4-family containers cannot hold PCM or many compressed codecs — re-encode to AAC.
+    # Other containers (MKV etc.) can stream-copy most codecs.
+    # Note: when original audio goes through the volume filter it must be re-encoded
+    # regardless; force_aac ensures correctness for MP4 even if the filter is later removed.
+    force_aac_for_original_audio = output_ext in {".mp4", ".m4v", ".ismv"}
+
     codec_args = ["-c:v", "copy"]
     for i in range(n_orig_audio):
-        codec_args += [f"-c:a:{i}", "aac"]
+        codec_args += [f"-c:a:{i}", "aac" if force_aac_for_original_audio else "copy"]
     codec_args += [f"-c:a:{n_orig_audio}", "aac"]
 
     # Output-side -ss/-to: accurate timestamps, no stutter.
@@ -73,8 +80,6 @@ def export(
         trim_args += ["-ss", str(trim_video_start)]
     if trim_video_end is not None:
         trim_args += ["-to", str(trim_video_end)]
-
-    out = _ensure_extension(output_path)
 
     cmd = [
         ffmpeg, "-y",
@@ -90,7 +95,6 @@ def export(
         out,
     ]
 
-    print(f"[exporter] CMD: {' '.join(cmd)}")
     run_ffmpeg(cmd)
 
 

@@ -73,3 +73,18 @@ def test_output_path_without_extension_gets_mp4(monkeypatch):
     calls = _patch_ffmpeg(monkeypatch)
     export("in.mp4", "b.wav", 0.0, "out_no_ext")
     assert calls[-1][-1] == "out_no_ext.mp4"
+
+
+def test_mp4_output_reencodes_original_audio_to_aac(monkeypatch):
+    calls = _patch_ffmpeg(monkeypatch, audio_stream_count=2)
+    export("in.mov", "b.wav", 0.0, "out.mp4")
+    cmd = calls[-1]
+    assert ["-c:a:0", "aac"] == cmd[cmd.index("-c:a:0"): cmd.index("-c:a:0") + 2]
+    assert ["-c:a:1", "aac"] == cmd[cmd.index("-c:a:1"): cmd.index("-c:a:1") + 2]
+
+
+def test_non_mp4_output_copies_original_audio(monkeypatch):
+    calls = _patch_ffmpeg(monkeypatch, audio_stream_count=1)
+    export("in.mov", "b.wav", 0.0, "out.mkv")
+    cmd = calls[-1]
+    assert ["-c:a:0", "copy"] == cmd[cmd.index("-c:a:0"): cmd.index("-c:a:0") + 2]
