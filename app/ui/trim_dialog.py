@@ -52,6 +52,7 @@ class TrimTimeline(QWidget):
     range_changed = Signal(float, float)
     handle_moved = Signal(float)
     handle_released = Signal(float)
+    playhead_scrubbed = Signal(float)
 
     def __init__(self, duration: float, initial_start: float, initial_end: float,
                  parent: QWidget | None = None) -> None:
@@ -59,6 +60,7 @@ class TrimTimeline(QWidget):
         self._duration = max(duration, 0.001)
         self._start = max(0.0, min(initial_start, self._duration))
         self._end = max(self._start, min(initial_end, self._duration))
+        self._playhead = self._start
         self._dragging: str | None = None
         self._last_t: float = initial_end
         self.setMinimumHeight(48)
@@ -70,18 +72,27 @@ class TrimTimeline(QWidget):
     def end(self) -> float:
         return self._end
 
+    def set_playhead(self, t: float) -> None:
+        clamped = max(self._start, min(self._end, t))
+        if abs(clamped - self._playhead) < 0.001:
+            return
+        self._playhead = clamped
+        self.update()
+
     def paintEvent(self, _event) -> None:  # type: ignore[override]
         p = QPainter(self)
         p.setRenderHint(QPainter.Antialiasing, False)
         w, h = self.width(), self.height()
         bar_top, bar_h = _BAR_H_PAD, h - 2 * _BAR_H_PAD
         sx, ex = self._t_to_x(self._start), self._t_to_x(self._end)
+        px = self._t_to_x(self._playhead)
         p.fillRect(QRect(0, bar_top, sx, bar_h), QColor(30, 30, 30, 200))
         p.fillRect(QRect(ex, bar_top, w - ex, bar_h), QColor(30, 30, 30, 200))
         p.fillRect(QRect(sx, bar_top, ex - sx, bar_h), QColor(255, 190, 0))
         for x in (sx, ex):
             p.fillRect(QRect(x - _HANDLE_W // 2, 0, _HANDLE_W, h), QColor(255, 255, 255))
             p.fillRect(QRect(x - 1, (h - 16) // 2, 3, 16), QColor(160, 160, 160))
+        p.fillRect(QRect(px - 1, 0, 3, h), QColor(255, 64, 64))
 
     def mousePressEvent(self, event) -> None:  # type: ignore[override]
         if event.button() != Qt.LeftButton:
@@ -93,7 +104,7 @@ class TrimTimeline(QWidget):
         elif abs(x - ex) <= _SNAP_PX:
             self._dragging = "end"
         else:
-            self._dragging = "start" if abs(x - sx) < abs(x - ex) else "end"
+            self._dragging = "playhead"
         self._update(x)
 
     def mouseMoveEvent(self, event) -> None:  # type: ignore[override]
@@ -111,9 +122,15 @@ class TrimTimeline(QWidget):
         if self._dragging == "start":
             self._start = min(t, self._end - 0.1)
             self._last_t = self._start
-        else:
+        elif self._dragging == "end":
             self._end = max(t, self._start + 0.1)
             self._last_t = self._end
+        else:
+            self._playhead = max(self._start, min(self._end, t))
+            self.playhead_scrubbed.emit(self._playhead)
+            self.update()
+            return
+        self._playhead = max(self._start, min(self._end, self._playhead))
         self.update()
         self.range_changed.emit(self._start, self._end)
         self.handle_moved.emit(self._last_t)
@@ -175,6 +192,7 @@ class TrimDialog(QDialog):
         self._timeline.range_changed.connect(self._on_range_changed)
         self._timeline.handle_moved.connect(self._on_handle_moved)
         self._timeline.handle_released.connect(self._on_handle_released)
+        self._timeline.playhead_scrubbed.connect(self._on_playhead_scrubbed)
 
         # --- Labels ---
         self._start_label = QLabel(self._fmt(self._start))
@@ -204,7 +222,7 @@ class TrimDialog(QDialog):
         self.setLayout(layout)
 
         # Start initial frame extraction after dialog is laid out
-        QTimer.singleShot(50, lambda: self._request_frame(self._end))
+        QTimer.singleShot(50, lambda: self._request_frame(self._start))
 
     def start_seconds(self) -> float:
         return self._start
@@ -227,12 +245,19 @@ class TrimDialog(QDialog):
     def _on_range_changed(self, start: float, end: float) -> None:
         self._start = start
         self._end = end
+        self._timeline.set_playhead(self._player.position() / 1000.0)
         self._start_label.setText(self._fmt(start))
         self._end_label.setText(self._fmt(end))
         if self._player.playbackState() == QMediaPlayer.PlayingState:
             self._player.pause()
             self._stack.setCurrentIndex(0)
             self._play_btn.setText("▶  Play")
+
+    def _on_playhead_scrubbed(self, t: float) -> None:
+        pos_ms = int(t * 1000)
+        self._player.setPosition(pos_ms)
+        if self._player.playbackState() != QMediaPlayer.PlayingState:
+            self._request_frame(t)
 
     def _request_frame(self, t: float) -> None:
         if self._extracting:
@@ -283,6 +308,7 @@ class TrimDialog(QDialog):
             self._player.pause()
             self._play_btn.setText("▶  Play")
             self._stack.setCurrentIndex(0)
+            self._request_frame(self._player.position() / 1000.0)
         else:
             self._stack.setCurrentIndex(1)
             pos = self._player.position()
@@ -295,11 +321,14 @@ class TrimDialog(QDialog):
             self._play_btn.setText("⏸  Pause")
 
     def _on_position_changed(self, pos_ms: int) -> None:
+        self._timeline.set_playhead(pos_ms / 1000.0)
         if (self._player.playbackState() == QMediaPlayer.PlayingState
                 and pos_ms >= int(self._end * 1000)):
             self._player.pause()
+            self._player.setPosition(int(self._end * 1000))
             self._play_btn.setText("▶  Play")
             self._stack.setCurrentIndex(0)
+            self._request_frame(self._end)
 
     @staticmethod
     def _fmt(seconds: float) -> str:
