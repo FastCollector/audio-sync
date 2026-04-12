@@ -88,3 +88,69 @@ def test_non_mp4_output_copies_original_audio(monkeypatch):
     export("in.mov", "b.wav", 0.0, "out.mkv")
     cmd = calls[-1]
     assert ["-c:a:0", "copy"] == cmd[cmd.index("-c:a:0"): cmd.index("-c:a:0") + 2]
+
+
+def test_positive_offset_with_trim_start_uses_effective_offset_delay(monkeypatch):
+    calls = _patch_ffmpeg(monkeypatch)
+    export(
+        "in.mp4",
+        "b.wav",
+        0.50,
+        "out.mp4",
+        trim_video_start=0.20,
+    )
+    export_cmd = " ".join(calls[-1])
+
+    # effective_offset = 0.50 - 0.20 = +0.30 seconds
+    assert "adelay=300:all=1" in export_cmd
+    assert ["-ss", "0.2"] == calls[-1][calls[-1].index("-ss"): calls[-1].index("-ss") + 2]
+
+
+def test_negative_offset_with_trim_start_uses_effective_offset_atrim(monkeypatch):
+    calls = _patch_ffmpeg(monkeypatch)
+    export(
+        "in.mp4",
+        "b.wav",
+        -0.10,
+        "out.mp4",
+        trim_video_start=0.20,
+    )
+    export_cmd = " ".join(calls[-1])
+
+    # effective_offset = -0.10 - 0.20 = -0.30 seconds
+    assert "atrim=start=0.300000" in export_cmd
+    assert "asetpts=PTS-STARTPTS" in export_cmd
+
+
+def test_trim_video_end_adds_to_arg_without_changing_audio_offset(monkeypatch):
+    calls = _patch_ffmpeg(monkeypatch)
+    export(
+        "in.mp4",
+        "b.wav",
+        0.40,
+        "out.mp4",
+        trim_video_end=5.0,
+    )
+    cmd = calls[-1]
+    export_cmd = " ".join(cmd)
+
+    # No trim start → effective_offset remains +0.40 seconds
+    assert "adelay=400:all=1" in export_cmd
+    assert ["-to", "5.0"] == cmd[cmd.index("-to"): cmd.index("-to") + 2]
+
+
+def test_negative_effective_offset_with_trim_audio_end_trims_correct_segment(monkeypatch):
+    calls = _patch_ffmpeg(monkeypatch)
+    export(
+        "in.mp4",
+        "b.wav",
+        -0.10,
+        "out.mp4",
+        trim_video_start=0.20,
+        trim_audio_end=2.50,
+    )
+    export_cmd = " ".join(calls[-1])
+
+    # effective_offset = -0.30, so atrim starts at 0.30 and ends at 2.80
+    assert "atrim=start=0.300000:end=2.800000" in export_cmd
+    assert "asetpts=PTS-STARTPTS" in export_cmd
