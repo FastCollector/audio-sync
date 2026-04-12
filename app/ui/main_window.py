@@ -159,6 +159,9 @@ class MainWindow(QMainWindow):
         self.import_panel.sync_button.setEnabled(False)
         self.export_panel.set_busy(True)
 
+        video_vol = self.preview_panel.video_volume.value() / 100.0
+        audio_b_vol = self.preview_panel.external_volume.value() / 100.0
+
         def task() -> None:
             export(
                 video_path,
@@ -168,6 +171,8 @@ class MainWindow(QMainWindow):
                 trim_audio_end=sync_result.trim_audio_end,
                 trim_video_start=sync_result.trim_video_start,
                 trim_video_end=sync_result.trim_video_end,
+                video_audio_volume=video_vol,
+                audio_b_volume=audio_b_vol,
             )
 
         self._running_thread = TaskThread(task)
@@ -238,7 +243,9 @@ class MainWindow(QMainWindow):
         self.export_panel.export_button.setEnabled(True)
         self.import_panel.set_sync_result(result.offset, result.confidence)
         self.preview_panel.configure(
-            self.import_panel.video_path(), self.import_panel.audio_path(), result.offset
+            self.import_panel.video_path(), self.import_panel.audio_path(), result.offset,
+            trim_start=result.trim_video_start,
+            trim_end=result.trim_video_end,
         )
         self.status_label.setText("Sync complete. Ready to export.")
 

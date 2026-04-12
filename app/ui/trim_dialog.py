@@ -1,16 +1,17 @@
 """
 Video trim dialog — drag left/right handles to set in-point and out-point.
-
-Styled after iOS Photos: amber region = kept, dark regions = trimmed off.
-Video preview seeks to whichever handle was last moved.
 """
 
 from __future__ import annotations
 
+import queue
+import subprocess
+import tempfile
+import threading
 from pathlib import Path
 
-from PySide6.QtCore import Qt, QRect, QUrl, Signal
-from PySide6.QtGui import QColor, QPainter
+from PySide6.QtCore import Qt, QRect, QTimer, QUrl, Signal
+from PySide6.QtGui import QColor, QPainter, QPixmap
 from PySide6.QtMultimedia import QAudioOutput, QMediaPlayer
 from PySide6.QtMultimediaWidgets import QVideoWidget
 from PySide6.QtWidgets import (
@@ -18,39 +19,48 @@ from PySide6.QtWidgets import (
     QDialogButtonBox,
     QHBoxLayout,
     QLabel,
+    QPushButton,
+    QStackedWidget,
     QVBoxLayout,
     QWidget,
 )
 
+from app.core.ffmpeg_utils import get_ffmpeg_executable
+
 _HANDLE_W = 14
 _BAR_H_PAD = 8
-_SNAP_PX = _HANDLE_W  # pixel radius within which a click snaps to a handle
+_SNAP_PX = _HANDLE_W
+_PREVIEW_H = 300
+
+
+def _extract_frame(video_path: str, t: float) -> str:
+    try:
+        ffmpeg = get_ffmpeg_executable()
+        with tempfile.NamedTemporaryFile(suffix=".jpg", delete=False) as f:
+            tmp = f.name
+        subprocess.run(
+            [ffmpeg, "-y", "-ss", f"{t:.3f}", "-i", video_path,
+             "-frames:v", "1", "-q:v", "3", tmp],
+            stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, timeout=10,
+        )
+        return tmp
+    except Exception:
+        return ""
 
 
 class TrimTimeline(QWidget):
-    """
-    Horizontal timeline with draggable left (in) and right (out) handles.
-
-    Signals:
-        range_changed(start_seconds, end_seconds)
-        active_handle_changed(seconds)  — which handle is being moved (for video seek)
-    """
-
     range_changed = Signal(float, float)
-    active_handle_changed = Signal(float)
+    handle_moved = Signal(float)
+    handle_released = Signal(float)
 
-    def __init__(
-        self,
-        duration: float,
-        initial_start: float,
-        initial_end: float,
-        parent: QWidget | None = None,
-    ) -> None:
+    def __init__(self, duration: float, initial_start: float, initial_end: float,
+                 parent: QWidget | None = None) -> None:
         super().__init__(parent)
         self._duration = max(duration, 0.001)
         self._start = max(0.0, min(initial_start, self._duration))
         self._end = max(self._start, min(initial_end, self._duration))
-        self._dragging: str | None = None  # "start" | "end" | None
+        self._dragging: str | None = None
+        self._last_t: float = initial_end
         self.setMinimumHeight(48)
         self.setMouseTracking(True)
 
@@ -60,54 +70,29 @@ class TrimTimeline(QWidget):
     def end(self) -> float:
         return self._end
 
-    # ------------------------------------------------------------------
-    # Drawing
-    # ------------------------------------------------------------------
-
     def paintEvent(self, _event) -> None:  # type: ignore[override]
         p = QPainter(self)
         p.setRenderHint(QPainter.Antialiasing, False)
-
         w, h = self.width(), self.height()
-        bar_top = _BAR_H_PAD
-        bar_h = h - 2 * _BAR_H_PAD
-
-        sx = self._t_to_x(self._start)
-        ex = self._t_to_x(self._end)
-
-        # Trimmed-off regions — dark
+        bar_top, bar_h = _BAR_H_PAD, h - 2 * _BAR_H_PAD
+        sx, ex = self._t_to_x(self._start), self._t_to_x(self._end)
         p.fillRect(QRect(0, bar_top, sx, bar_h), QColor(30, 30, 30, 200))
         p.fillRect(QRect(ex, bar_top, w - ex, bar_h), QColor(30, 30, 30, 200))
-
-        # Kept region — amber
         p.fillRect(QRect(sx, bar_top, ex - sx, bar_h), QColor(255, 190, 0))
-
-        # Draw both handles
         for x in (sx, ex):
             p.fillRect(QRect(x - _HANDLE_W // 2, 0, _HANDLE_W, h), QColor(255, 255, 255))
-            notch_w, notch_h = 3, 16
-            p.fillRect(
-                QRect(x - notch_w // 2, (h - notch_h) // 2, notch_w, notch_h),
-                QColor(160, 160, 160),
-            )
-
-    # ------------------------------------------------------------------
-    # Mouse
-    # ------------------------------------------------------------------
+            p.fillRect(QRect(x - 1, (h - 16) // 2, 3, 16), QColor(160, 160, 160))
 
     def mousePressEvent(self, event) -> None:  # type: ignore[override]
         if event.button() != Qt.LeftButton:
             return
         x = event.position().x()
-        sx = self._t_to_x(self._start)
-        ex = self._t_to_x(self._end)
-        # Snap to nearest handle if within snap radius
+        sx, ex = self._t_to_x(self._start), self._t_to_x(self._end)
         if abs(x - sx) <= _SNAP_PX and abs(x - sx) <= abs(x - ex):
             self._dragging = "start"
         elif abs(x - ex) <= _SNAP_PX:
             self._dragging = "end"
         else:
-            # Click in the middle — move nearest handle
             self._dragging = "start" if abs(x - sx) < abs(x - ex) else "end"
         self._update(x)
 
@@ -117,73 +102,92 @@ class TrimTimeline(QWidget):
             self.setCursor(Qt.SizeHorCursor)
 
     def mouseReleaseEvent(self, event) -> None:  # type: ignore[override]
+        if self._dragging:
+            self.handle_released.emit(self._last_t)
         self._dragging = None
 
     def _update(self, x: float) -> None:
         t = max(0.0, min(self._duration, x / max(self.width(), 1) * self._duration))
         if self._dragging == "start":
             self._start = min(t, self._end - 0.1)
-            self.active_handle_changed.emit(self._start)
+            self._last_t = self._start
         else:
             self._end = max(t, self._start + 0.1)
-            self.active_handle_changed.emit(self._end)
+            self._last_t = self._end
         self.update()
         self.range_changed.emit(self._start, self._end)
-
-    # ------------------------------------------------------------------
+        self.handle_moved.emit(self._last_t)
 
     def _t_to_x(self, t: float) -> int:
         return int(t / self._duration * self.width())
 
 
 class TrimDialog(QDialog):
-    """Modal dialog for trimming video in/out points."""
-
-    def __init__(
-        self,
-        video_path: str,
-        duration: float,
-        default_start: float,
-        default_end: float,
-        parent: QWidget | None = None,
-    ) -> None:
+    def __init__(self, video_path: str, duration: float, default_start: float,
+                 default_end: float, parent: QWidget | None = None) -> None:
         super().__init__(parent)
         self.setWindowTitle("Trim Video")
         self.setMinimumWidth(680)
 
+        self._video_path = video_path
         self._start = max(0.0, min(default_start, duration))
         self._end = max(self._start, min(default_end, duration))
 
-        # Video preview (muted)
+        # Thread-safe result queue: worker puts tmp path, poll timer reads it
+        self._result_queue: queue.Queue[str] = queue.Queue()
+        self._extracting = False
+        self._pending_t: float | None = None
+
+        # Poll timer — checks queue every 50ms in the main thread
+        self._poll_timer = QTimer(self)
+        self._poll_timer.setInterval(50)
+        self._poll_timer.timeout.connect(self._poll_result)
+        self._poll_timer.start()
+
+        # --- Preview: stacked (still frame / video widget) ---
+        self._stack = QStackedWidget()
+        self._stack.setFixedHeight(_PREVIEW_H)
+
+        self._frame_label = QLabel("Loading...")
+        self._frame_label.setAlignment(Qt.AlignCenter)
+        self._frame_label.setStyleSheet("background: black; color: #888;")
+
         self._video_widget = QVideoWidget()
-        self._video_widget.setMinimumHeight(300)
-
         self._audio_out = QAudioOutput()
-        self._audio_out.setVolume(0.0)
-
+        self._audio_out.setVolume(1.0)
         self._player = QMediaPlayer(self)
         self._player.setVideoOutput(self._video_widget)
         self._player.setAudioOutput(self._audio_out)
         self._player.setSource(QUrl.fromLocalFile(str(Path(video_path).resolve())))
-        self._player.mediaStatusChanged.connect(self._on_media_status)
+        self._player.positionChanged.connect(self._on_position_changed)
 
-        # Timeline with two handles
+        self._stack.addWidget(self._frame_label)   # 0
+        self._stack.addWidget(self._video_widget)  # 1
+        self._stack.setCurrentIndex(0)
+
+        # --- Play button ---
+        self._play_btn = QPushButton("▶  Play")
+        self._play_btn.setFixedWidth(100)
+        self._play_btn.clicked.connect(self._toggle_play)
+
+        # --- Timeline ---
         self._timeline = TrimTimeline(duration, self._start, self._end)
         self._timeline.range_changed.connect(self._on_range_changed)
-        self._timeline.active_handle_changed.connect(self._on_handle_moved)
+        self._timeline.handle_moved.connect(self._on_handle_moved)
+        self._timeline.handle_released.connect(self._on_handle_released)
 
-        # Time labels: start / end
+        # --- Labels ---
         self._start_label = QLabel(self._fmt(self._start))
         self._start_label.setAlignment(Qt.AlignLeft)
         self._end_label = QLabel(self._fmt(self._end))
         self._end_label.setAlignment(Qt.AlignRight)
         for lbl in (self._start_label, self._end_label):
-            font = lbl.font()
-            font.setPointSize(12)
-            lbl.setFont(font)
+            f = lbl.font(); f.setPointSize(12); lbl.setFont(f)
 
         time_row = QHBoxLayout()
         time_row.addWidget(self._start_label)
+        time_row.addStretch()
+        time_row.addWidget(self._play_btn)
         time_row.addStretch()
         time_row.addWidget(self._end_label)
 
@@ -192,12 +196,15 @@ class TrimDialog(QDialog):
         buttons.rejected.connect(self.reject)
 
         layout = QVBoxLayout()
-        layout.addWidget(self._video_widget, stretch=1)
+        layout.addWidget(self._stack)
         layout.addSpacing(4)
         layout.addWidget(self._timeline)
         layout.addLayout(time_row)
         layout.addWidget(buttons)
         self.setLayout(layout)
+
+        # Start initial frame extraction after dialog is laid out
+        QTimer.singleShot(50, lambda: self._request_frame(self._end))
 
     def start_seconds(self) -> float:
         return self._start
@@ -205,23 +212,94 @@ class TrimDialog(QDialog):
     def end_seconds(self) -> float:
         return self._end
 
+    def closeEvent(self, event) -> None:  # type: ignore[override]
+        self._poll_timer.stop()
+        super().closeEvent(event)
+
     # ------------------------------------------------------------------
+
+    def _on_handle_moved(self, t: float) -> None:
+        self._request_frame(t)
+
+    def _on_handle_released(self, t: float) -> None:
+        self._request_frame(t)
 
     def _on_range_changed(self, start: float, end: float) -> None:
         self._start = start
         self._end = end
         self._start_label.setText(self._fmt(start))
         self._end_label.setText(self._fmt(end))
-
-    def _on_handle_moved(self, t: float) -> None:
-        self._player.setPosition(int(t * 1000))
         if self._player.playbackState() == QMediaPlayer.PlayingState:
             self._player.pause()
+            self._stack.setCurrentIndex(0)
+            self._play_btn.setText("▶  Play")
 
-    def _on_media_status(self, status: QMediaPlayer.MediaStatus) -> None:
-        if status == QMediaPlayer.LoadedMedia:
-            self._player.setPosition(int(self._end * 1000))
+    def _request_frame(self, t: float) -> None:
+        if self._extracting:
+            self._pending_t = t
+            return
+        self._start_extraction(t)
+
+    def _start_extraction(self, t: float) -> None:
+        self._extracting = True
+        self._pending_t = None
+        video_path = self._video_path
+        result_queue = self._result_queue
+
+        def run():
+            tmp = _extract_frame(video_path, t)
+            result_queue.put(tmp)
+
+        threading.Thread(target=run, daemon=True).start()
+
+    def _poll_result(self) -> None:
+        try:
+            tmp = self._result_queue.get_nowait()
+        except queue.Empty:
+            return
+
+        self._extracting = False
+
+        if tmp:
+            px = QPixmap(tmp)
+            try:
+                Path(tmp).unlink(missing_ok=True)
+            except Exception:
+                pass
+            if not px.isNull():
+                w = self._stack.width() or 640
+                px = px.scaled(w, _PREVIEW_H, Qt.KeepAspectRatio, Qt.SmoothTransformation)
+                self._frame_label.setPixmap(px)
+                self._frame_label.setText("")
+                self._stack.setCurrentIndex(0)
+
+        if self._pending_t is not None:
+            self._start_extraction(self._pending_t)
+
+    # --- Playback ---
+
+    def _toggle_play(self) -> None:
+        if self._player.playbackState() == QMediaPlayer.PlayingState:
             self._player.pause()
+            self._play_btn.setText("▶  Play")
+            self._stack.setCurrentIndex(0)
+        else:
+            self._stack.setCurrentIndex(1)
+            pos = self._player.position()
+            start_ms = int(self._start * 1000)
+            end_ms = int(self._end * 1000)
+            # Always start from trim start, unless already within the trim range
+            if pos < start_ms or pos >= end_ms:
+                self._player.setPosition(start_ms)
+            self._player.play()
+            self._play_btn.setText("⏸  Pause")
+
+    def _on_position_changed(self, pos_ms: int) -> None:
+        if (self._player.playbackState() == QMediaPlayer.PlayingState
+                and pos_ms >= int(self._end * 1000)):
+            self._player.pause()
+            self._play_btn.setText("▶  Play")
+            self._stack.setCurrentIndex(0)
 
     @staticmethod
     def _fmt(seconds: float) -> str:

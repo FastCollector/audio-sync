@@ -26,6 +26,9 @@ class PreviewPanel(QGroupBox):
         self.video_path: str | None = None
         self.audio_path: str | None = None
         self.offset_ms = 0
+        self._trim_start_ms: int | None = None
+        self._trim_end_ms: int | None = None
+        self._seek_on_play = False  # seek to trim_start on next play state
 
         self.video_widget = QVideoWidget()
         self.video_widget.setMinimumHeight(260)
@@ -49,6 +52,30 @@ class PreviewPanel(QGroupBox):
         self.seek_slider = QSlider(Qt.Horizontal)
         self.seek_slider.setRange(0, 0)
         self.seek_slider.sliderMoved.connect(self._seek_to)
+        self.seek_slider.setMinimumHeight(28)
+        self.seek_slider.setStyleSheet("""
+            QSlider::groove:horizontal {
+                height: 6px;
+                background: #444;
+                border-radius: 3px;
+            }
+            QSlider::sub-page:horizontal {
+                background: #f0a500;
+                border-radius: 3px;
+            }
+            QSlider::handle:horizontal {
+                width: 18px;
+                height: 18px;
+                margin: -6px 0;
+                border-radius: 9px;
+                background: white;
+                border: 2px solid #ccc;
+            }
+            QSlider::handle:horizontal:hover {
+                background: #f0a500;
+                border-color: #f0a500;
+            }
+        """)
 
         self.time_label = QLabel("00:00 / 00:00")
 
@@ -100,12 +127,21 @@ class PreviewPanel(QGroupBox):
 
         self.set_enabled(False)
 
-    def configure(self, video_path: str, audio_path: str, offset_seconds: float) -> None:
+    def configure(
+        self,
+        video_path: str,
+        audio_path: str,
+        offset_seconds: float,
+        trim_start: float | None = None,
+        trim_end: float | None = None,
+    ) -> None:
         self.stop()
 
         self.video_path = video_path
         self.audio_path = audio_path
         self.offset_ms = int(round(offset_seconds * 1000.0))
+        self._trim_start_ms = int(trim_start * 1000) if trim_start is not None else None
+        self._trim_end_ms = int(trim_end * 1000) if trim_end is not None else None
 
         self.video_player.setSource(QUrl.fromLocalFile(str(Path(video_path).resolve())))
         self.external_player.setSource(QUrl.fromLocalFile(str(Path(audio_path).resolve())))
@@ -118,6 +154,9 @@ class PreviewPanel(QGroupBox):
         self.video_path = None
         self.audio_path = None
         self.offset_ms = 0
+        self._trim_start_ms = None
+        self._trim_end_ms = None
+        self._seek_on_play = False
         self.video_player.setSource(QUrl())
         self.external_player.setSource(QUrl())
         self.state_label.setText("Load files and run Sync to enable preview")
@@ -137,6 +176,15 @@ class PreviewPanel(QGroupBox):
             self.external_player.pause()
             self._sync_timer.stop()
             return
+
+        start = self._trim_start_ms or 0
+        pos = self.video_player.position()
+
+        # If outside trim range, flag that we need to seek once playing starts
+        if self._trim_start_ms is not None and pos < self._trim_start_ms:
+            self._seek_on_play = True
+        elif self._trim_end_ms is not None and pos >= self._trim_end_ms:
+            self._seek_on_play = True
 
         self.video_player.play()
         self._sync_external_player(force=True)
@@ -158,18 +206,35 @@ class PreviewPanel(QGroupBox):
     def _on_duration_changed(self, duration_ms: int) -> None:
         with QSignalBlocker(self.seek_slider):
             self.seek_slider.setRange(0, max(duration_ms, 0))
-        self._update_time_label(self.video_player.position(), duration_ms)
+        start = self._trim_start_ms or 0
+        end = self._trim_end_ms if self._trim_end_ms is not None else max(duration_ms, 0)
+        self._update_time_label(start, end)
 
     def _on_video_position_changed(self, position_ms: int) -> None:
+        # Auto-stop at trim end
+        if self._trim_end_ms is not None:
+            if (self.video_player.playbackState() == QMediaPlayer.PlayingState
+                    and position_ms >= self._trim_end_ms):
+                self.video_player.pause()
+                self.external_player.pause()
+                self._sync_timer.stop()
+
         if not self.seek_slider.isSliderDown():
             with QSignalBlocker(self.seek_slider):
                 self.seek_slider.setValue(position_ms)
-        self._update_time_label(position_ms, self.video_player.duration())
+        duration = self.video_player.duration() or 1
+        end = self._trim_end_ms if self._trim_end_ms is not None else duration
+        self._update_time_label(position_ms, end)
 
     def _on_video_state_changed(self, state: QMediaPlayer.PlaybackState) -> None:
         if state == QMediaPlayer.PlayingState:
             self.play_pause_btn.setText("Pause")
             self._sync_timer.start()
+            # Seek to trim start now that player is in Playing state
+            if self._seek_on_play:
+                self._seek_on_play = False
+                start = self._trim_start_ms or 0
+                self.video_player.setPosition(start)
             return
 
         self.play_pause_btn.setText("Play")

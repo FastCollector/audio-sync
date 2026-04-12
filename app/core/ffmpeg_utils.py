@@ -46,6 +46,7 @@ def run_ffmpeg(cmd: list[str], *, text: bool = False) -> subprocess.CompletedPro
                 "Please choose a different file."
             ) from exc
 
+        print(f"[ffmpeg] FULL STDERR:\n{stderr}")
         details = stderr.splitlines()[-1].strip() if stderr.strip() else "Unknown FFmpeg error"
         raise FFmpegError(f"FFmpeg failed: {details}") from exc
 
