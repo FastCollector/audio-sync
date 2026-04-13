@@ -30,8 +30,8 @@ def compute_offset(ref_audio_path: str, ext_audio_path: str) -> tuple[float, flo
         confidence:
             0–1 scale.  > 0.8 = strong match.  < 0.5 = likely wrong/unrelated.
     """
-    ref, ref_sr = librosa.load(ref_audio_path, sr=SAMPLE_RATE, mono=True)
-    ext, ext_sr = librosa.load(ext_audio_path, sr=SAMPLE_RATE, mono=True)
+    ref, ref_sr = librosa.load(ref_audio_path, sr=SAMPLE_RATE, mono=True, res_type="scipy")
+    ext, ext_sr = librosa.load(ext_audio_path, sr=SAMPLE_RATE, mono=True, res_type="scipy")
 
     print(f"[sync] ref audio:  {len(ref)} samples @ {ref_sr} Hz  ({len(ref)/ref_sr:.2f}s)")
     print(f"[sync] ext audio:  {len(ext)} samples @ {ext_sr} Hz  ({len(ext)/ext_sr:.2f}s)")
