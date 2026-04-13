@@ -1,6 +1,11 @@
 """Phase 2 GUI entrypoint for audio-sync."""
 
+import os
 import sys
+
+# Disable numba JIT so librosa uses plain numpy — avoids a 10-second
+# recompilation pause on first run inside a PyInstaller bundle.
+os.environ.setdefault("NUMBA_DISABLE_JIT", "1")
 
 from PySide6.QtWidgets import QApplication
 

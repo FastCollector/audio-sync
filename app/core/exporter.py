@@ -72,17 +72,23 @@ def export(
         codec_args += [f"-c:a:{i}", "aac" if force_aac_for_original_audio else "copy"]
     codec_args += [f"-c:a:{n_orig_audio}", "aac"]
 
-    # Output-side -ss/-to: accurate timestamps, no stutter.
-    # (Input-side -ss with -c:v copy shifts timestamps relative to the keyframe,
-    #  causing A/V drift and dropped frames at the start.)
-    trim_args = []
+    # Input-side -ss for trim start: FFmpeg seeks to the nearest keyframe, so
+    # stream-copied video always begins on a clean keyframe (no black first frames).
+    # Trade-off: start may be up to one GOP earlier than the exact trim point.
+    # End time uses -t (duration) because input-side seek resets output timestamps.
+    # When there is no trim start, output-side -to is exact and has no keyframe issue.
+    input_seek_args: list[str] = []
+    output_trim_args: list[str] = []
     if trim_video_start is not None:
-        trim_args += ["-ss", str(trim_video_start)]
-    if trim_video_end is not None:
-        trim_args += ["-to", str(trim_video_end)]
+        input_seek_args = ["-ss", str(trim_video_start)]
+        if trim_video_end is not None:
+            output_trim_args = ["-t", str(trim_video_end - trim_video_start)]
+    elif trim_video_end is not None:
+        output_trim_args = ["-to", str(trim_video_end)]
 
     cmd = [
         ffmpeg, "-y",
+        *input_seek_args,
         "-i", video_path,
         "-i", audio_b_path,
         "-filter_complex", filter_complex,
@@ -90,7 +96,7 @@ def export(
         *[arg for label in va_labels for arg in ("-map", label)],
         "-map", "[b_out]",
         *codec_args,
-        *trim_args,
+        *output_trim_args,
         "-avoid_negative_ts", "make_zero",
         out,
     ]
