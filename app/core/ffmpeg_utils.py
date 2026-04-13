@@ -3,8 +3,12 @@
 from __future__ import annotations
 
 import subprocess
+import sys
 
 import imageio_ffmpeg
+
+# Suppress the console window that Windows spawns for child processes.
+_CREATIONFLAGS = subprocess.CREATE_NO_WINDOW if sys.platform == "win32" else 0
 
 
 class FFmpegError(RuntimeError):
@@ -32,7 +36,7 @@ def get_ffmpeg_executable() -> str:
 def run_ffmpeg(cmd: list[str], *, text: bool = False) -> subprocess.CompletedProcess:
     """Run an FFmpeg command and convert low-level failures into readable errors."""
     try:
-        return subprocess.run(cmd, check=True, capture_output=True, text=text)
+        return subprocess.run(cmd, check=True, capture_output=True, text=text, creationflags=_CREATIONFLAGS)
     except FileNotFoundError as exc:
         raise FFmpegError(
             "FFmpeg executable was not found. Reinstall imageio-ffmpeg or rebuild the app package."
@@ -57,7 +61,7 @@ def probe_media(cmd: list[str]) -> subprocess.CompletedProcess:
     We still parse stderr for corrupt/missing-file diagnostics.
     """
     try:
-        result = subprocess.run(cmd, check=False, capture_output=True, text=True)
+        result = subprocess.run(cmd, check=False, capture_output=True, text=True, creationflags=_CREATIONFLAGS)
     except FileNotFoundError as exc:
         raise FFmpegError(
             "FFmpeg executable was not found. Reinstall imageio-ffmpeg or rebuild the app package."

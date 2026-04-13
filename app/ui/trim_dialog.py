@@ -42,6 +42,7 @@ def _extract_frame(video_path: str, t: float) -> str:
             [ffmpeg, "-y", "-ss", f"{t:.3f}", "-i", video_path,
              "-frames:v", "1", "-q:v", "3", tmp],
             stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, timeout=10,
+            creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0),
         )
         return tmp
     except Exception:
