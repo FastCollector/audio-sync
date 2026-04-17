@@ -1,11 +1,12 @@
 """
-Compute the time offset between two audio recordings via cross-correlation
-of onset strength envelopes.
+Compute the time offset between two audio recordings.
 
-Using envelopes instead of raw samples makes the algorithm robust to
-codec differences (e.g. iPhone AAC mic vs Zoom WAV line-in): both recordings
-share the same transient events (speech starts, hand claps, instrument hits)
-regardless of frequency response or compression.
+Stage 1 (coarse): onset-strength envelope cross-correlation.
+  Robust to codec/EQ differences; resolution ~32 ms (one hop at 16 kHz).
+
+Stage 2 (refinement): GCC-PHAT on the raw waveform within ±50 ms of the
+  coarse offset.  Phase-whitening makes it insensitive to spectral colour;
+  resolution is one sample (0.0625 ms at 16 kHz).
 """
 
 import numpy as np
@@ -13,6 +14,7 @@ import librosa
 from scipy.signal import correlate
 
 SAMPLE_RATE = 16000  # Hz — sufficient for transient-based sync detection
+_REFINE_RADIUS = int(0.05 * SAMPLE_RATE)  # 800 samples = 50 ms
 
 
 def compute_offset(ref_audio_path: str, ext_audio_path: str) -> tuple[float, float]:
@@ -36,9 +38,9 @@ def compute_offset(ref_audio_path: str, ext_audio_path: str) -> tuple[float, flo
     print(f"[sync] ref audio:  {len(ref)} samples @ {ref_sr} Hz  ({len(ref)/ref_sr:.2f}s)")
     print(f"[sync] ext audio:  {len(ext)} samples @ {ext_sr} Hz  ({len(ext)/ext_sr:.2f}s)")
 
-    # Compute onset strength envelopes. These capture the temporal pattern of
-    # energy bursts (transients) and are invariant to timbre, EQ, and codec.
-    # hop_length=512 at 16kHz → ~32ms per frame, accurate enough for sync.
+    # Stage 1 — coarse alignment via onset-strength envelope cross-correlation.
+    # Envelopes capture transient timing and are invariant to timbre/EQ/codec.
+    # hop_length=512 at 16 kHz → ~32 ms per frame.
     hop = 512
     ref_env = librosa.onset.onset_strength(y=ref, sr=SAMPLE_RATE, hop_length=hop)
     ext_env = librosa.onset.onset_strength(y=ext, sr=SAMPLE_RATE, hop_length=hop)
@@ -55,24 +57,17 @@ def compute_offset(ref_audio_path: str, ext_audio_path: str) -> tuple[float, flo
     n_ext = len(ext_env)
     lags = np.arange(-(n_ext - 1), n_ref)
 
-    # Normalize by sqrt(n_ref * n_ext) — a constant factor derived from the
-    # expected total energy of two unit-variance signals.  This avoids the
-    # per-lag-overlap normalization which inflates edge lags (tiny overlap →
-    # tiny divisor → spuriously large per-frame value) and produces false
-    # high-confidence peaks when the signals barely overlap.
+    # Normalize by sqrt(n_ref * n_ext) to avoid inflating edge lags.
     norm_factor = float(np.sqrt(n_ref * n_ext))
     corr_norm = corr / norm_factor if norm_factor > 0 else corr
 
     abs_corr = np.abs(corr_norm)
     peak_idx = np.argmax(abs_corr)
-    offset_seconds = float(lags[peak_idx] * hop / SAMPLE_RATE)
+    coarse_offset = float(lags[peak_idx] * hop / SAMPLE_RATE)
 
-    # Confidence = peak-to-second-peak ratio.
-    # Mask out a window around the main peak (±1 second in frames) before
-    # finding the second peak.  For a true match the main peak is isolated
-    # and much larger than any secondary peak → ratio near 1.0.
-    # For random / unrelated signals peaks are roughly equal → ratio near 0.
-    mask_radius = int(SAMPLE_RATE / hop)  # 1 s worth of envelope frames
+    # Confidence: peak-to-second-peak ratio.
+    # Mask ±1 s around the main peak before finding the second peak.
+    mask_radius = int(SAMPLE_RATE / hop)
     masked = abs_corr.copy()
     lo = max(0, peak_idx - mask_radius)
     hi = min(len(masked), peak_idx + mask_radius + 1)
@@ -81,12 +76,64 @@ def compute_offset(ref_audio_path: str, ext_audio_path: str) -> tuple[float, flo
     peak_val = float(abs_corr[peak_idx])
     confidence = float(min(1.0, 1.0 - second_peak / peak_val)) if peak_val > 0 else 0.0
 
-    print(f"[sync] peak correlation: {peak_val:.4f}")
-    print(f"[sync] second peak:      {second_peak:.4f}")
-    print(f"[sync] confidence:       {confidence:.4f}")
-    print(f"[sync] offset:           {offset_seconds:+.4f}s")
+    print(f"[sync] coarse offset:  {coarse_offset:+.4f}s  confidence: {confidence:.4f}")
 
-    return offset_seconds, confidence
+    # Stage 2 — GCC-PHAT refinement within ±50 ms of the coarse offset.
+    refined_offset = _refine_gcc_phat(ref, ext, coarse_offset)
+
+    print(f"[sync] refined offset: {refined_offset:+.4f}s  (delta: {(refined_offset - coarse_offset)*1000:+.1f} ms)")
+
+    return refined_offset, confidence
+
+
+def _refine_gcc_phat(ref: np.ndarray, ext: np.ndarray, coarse_offset_s: float) -> float:
+    """
+    Refine coarse_offset_s within ±50 ms using GCC-PHAT on raw waveforms.
+    Returns coarse_offset_s unchanged if there is insufficient overlap.
+    """
+    coarse_samples = int(round(coarse_offset_s * SAMPLE_RATE))
+
+    ref_start = max(0, coarse_samples)
+    ext_start = max(0, -coarse_samples)
+
+    overlap = min(len(ref) - ref_start, len(ext) - ext_start)
+    if overlap <= 2 * _REFINE_RADIUS:
+        return coarse_offset_s
+
+    # 2-second anchor window from the centre of the overlap.
+    seg_len = min(2 * SAMPLE_RATE, overlap - 2 * _REFINE_RADIUS)
+    if seg_len <= 0:
+        return coarse_offset_s
+
+    mid = overlap // 2
+    r_seg = ref[ref_start + mid - seg_len // 2 : ref_start + mid + seg_len // 2]
+    e_seg = ext[ext_start + mid - seg_len // 2 : ext_start + mid + seg_len // 2]
+
+    if len(r_seg) == 0 or len(e_seg) == 0:
+        return coarse_offset_s
+
+    # GCC-PHAT: whiten the cross-spectrum then IFFT.
+    n_fft = 1
+    while n_fft < len(r_seg) + len(e_seg) - 1:
+        n_fft <<= 1
+
+    cross = np.fft.rfft(r_seg, n=n_fft) * np.conj(np.fft.rfft(e_seg, n=n_fft))
+    denom = np.abs(cross)
+    denom[denom < 1e-10] = 1e-10
+    gcc = np.fft.irfft(cross / denom, n=n_fft)
+
+    # Search within ±_REFINE_RADIUS samples of lag 0.
+    # In the IFFT output: positive lags at [1.._REFINE_RADIUS],
+    # negative lags wrap to [n_fft-_REFINE_RADIUS..n_fft-1].
+    pos_vals = gcc[: _REFINE_RADIUS + 1]
+    neg_vals = gcc[n_fft - _REFINE_RADIUS : n_fft]
+    search_vals = np.concatenate([pos_vals, neg_vals])
+    search_lags = np.concatenate(
+        [np.arange(0, _REFINE_RADIUS + 1), np.arange(-_REFINE_RADIUS, 0)]
+    )
+
+    fine_lag = int(search_lags[np.argmax(search_vals)])
+    return coarse_offset_s + fine_lag / SAMPLE_RATE
 
 
 def _normalize(a: np.ndarray) -> np.ndarray:

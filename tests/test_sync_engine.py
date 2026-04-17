@@ -23,12 +23,17 @@ Signal model:
         b = impulses at a completely different set of positions
         → onset envelopes have nothing in common → all correlation lags similar
           → low confidence
+
+GCC-PHAT refinement tests:
+    _refine_gcc_phat is tested directly.  It takes raw numpy arrays so no
+    file I/O is needed.  Broadband noise has a sharp auto-correlation peak
+    which makes it ideal for sub-sample lag estimation.
 """
 
 import numpy as np
 import soundfile as sf
 
-from app.core.sync_engine import compute_offset, SAMPLE_RATE
+from app.core.sync_engine import compute_offset, _refine_gcc_phat, SAMPLE_RATE
 
 FPS = 24
 FRAME_SEC = 1 / FPS
@@ -88,3 +93,74 @@ def test_unrelated_noise_low_confidence(tmp_path):
     )
 
     assert confidence < 0.5
+
+
+# ---------------------------------------------------------------------------
+# GCC-PHAT refinement unit tests
+# ---------------------------------------------------------------------------
+
+def _broadband(n_samples: int, rng: np.random.Generator) -> np.ndarray:
+    """White noise — sharp auto-correlation peak, ideal for lag estimation."""
+    return rng.standard_normal(n_samples).astype(np.float32)
+
+
+def test_refinement_corrects_sub_frame_lag():
+    """
+    _refine_gcc_phat must resolve a lag smaller than one onset-envelope frame
+    (~32 ms) to within 1 sample.
+    """
+    rng = np.random.default_rng(42)
+    base = _broadband(SAMPLE_RATE * 5, rng)
+
+    true_lag = 15  # samples = 0.9375 ms — well below the 32 ms envelope frame
+    ref = np.pad(base, (true_lag, 0)).astype(np.float32)
+    ext = base
+
+    # Coarse estimate is 0.0 s (missed the 0.9375 ms shift entirely)
+    refined = _refine_gcc_phat(ref, ext, coarse_offset_s=0.0)
+
+    assert abs(refined - true_lag / SAMPLE_RATE) <= 1 / SAMPLE_RATE
+
+
+def test_refinement_corrects_negative_sub_frame_lag():
+    """Refinement works for negative fine lags (ext starts slightly before ref)."""
+    rng = np.random.default_rng(43)
+    base = _broadband(SAMPLE_RATE * 5, rng)
+
+    true_lag = -20  # samples = -1.25 ms
+    ext = np.pad(base, (-true_lag, 0)).astype(np.float32)  # ext has silence prefix
+    ref = base
+
+    refined = _refine_gcc_phat(ref, ext, coarse_offset_s=0.0)
+
+    assert abs(refined - true_lag / SAMPLE_RATE) <= 1 / SAMPLE_RATE
+
+
+def test_refinement_bounded_to_50ms():
+    """
+    Even when the coarse offset is wrong by more than 50 ms,
+    _refine_gcc_phat must not adjust by more than 50 ms + 1 sample.
+    """
+    rng = np.random.default_rng(99)
+    ref = _broadband(SAMPLE_RATE * 5, rng)
+    ext = _broadband(SAMPLE_RATE * 5, rng)  # unrelated — no true peak inside window
+
+    coarse = 1.0
+    refined = _refine_gcc_phat(ref, ext, coarse)
+
+    assert abs(refined - coarse) <= 0.05 + 1 / SAMPLE_RATE
+
+
+def test_refinement_fallback_on_insufficient_overlap():
+    """
+    When the signals barely overlap after applying the coarse offset,
+    _refine_gcc_phat must return the coarse offset unchanged.
+    """
+    rng = np.random.default_rng(7)
+    short = _broadband(SAMPLE_RATE // 2, rng)  # 0.5 s each
+
+    # Coarse offset puts ext almost entirely outside ref → tiny overlap
+    coarse = 0.49
+    refined = _refine_gcc_phat(short, short, coarse)
+
+    assert refined == coarse
