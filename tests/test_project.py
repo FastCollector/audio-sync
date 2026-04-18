@@ -54,6 +54,13 @@ def test_audio_track_ids_are_unique():
     assert a.id != b.id
 
 
+def test_project_has_unique_id():
+    p1 = Project()
+    p2 = Project()
+    assert isinstance(p1.id, str) and len(p1.id) > 0
+    assert p1.id != p2.id
+
+
 # ---------------------------------------------------------------------------
 # is_master derived from master_track_id
 

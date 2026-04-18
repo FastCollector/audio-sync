@@ -54,6 +54,7 @@ class VideoAsset:
 
 @dataclass
 class Project:
+    id: str = field(default_factory=lambda: str(uuid.uuid4()))
     video_asset: VideoAsset | None = None
     audio_tracks: list[AudioTrack] = field(default_factory=list)
     master_track_id: str | None = None
