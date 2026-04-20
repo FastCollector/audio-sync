@@ -203,8 +203,6 @@ def _video_shift_filter(
         chain.append(f"trim=end={trim_end:.6f}")
         chain.append("setpts=PTS-STARTPTS")
 
-    if not chain:
-        chain.append("copy")
     return f"[0:v]{','.join(chain)}[v_out]"
 
 
