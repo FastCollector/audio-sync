@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from dataclasses import dataclass
 from pathlib import Path
 
 from PySide6.QtCore import QSignalBlocker, Qt, QTimer, QUrl
@@ -17,17 +18,45 @@ from PySide6.QtWidgets import (
 )
 
 
+@dataclass
+class TrackSpec:
+    """Describes one audio track for preview playback.
+
+    `effective_offset_sec` is the track's master-aligned offset relative to
+    the video clock:  (track.offset_to_master - embedded.offset_to_master).
+    The embedded track has effective_offset_sec == 0 by definition and
+    `path` is ignored — it is rendered by the video_player itself.
+    """
+
+    track_id: str
+    display_name: str
+    is_embedded: bool
+    path: str | None
+    effective_offset_sec: float
+    volume: float = 1.0
+
+
 class PreviewPanel(QGroupBox):
-    """Preview video with original audio (track 0) and external audio B (track 1)."""
+    """Preview: video + N synchronized audio tracks.
+
+    - video_player renders video; its audio is the embedded track.
+    - Each non-embedded track has its own QMediaPlayer/QAudioOutput.
+    - Per-track volume sliders are rebuilt on configure_tracks().
+    """
 
     def __init__(self, parent: QWidget | None = None) -> None:
         super().__init__("Preview", parent)
 
         self.video_path: str | None = None
-        self.audio_path: str | None = None
-        self.offset_ms = 0
         self._trim_start_ms: int | None = None
         self._trim_end_ms: int | None = None
+
+        # Per-track state keyed by track_id.
+        self._audio_players: dict[str, QMediaPlayer] = {}
+        self._audio_outputs: dict[str, QAudioOutput] = {}
+        self._audio_offset_ms: dict[str, int] = {}
+        self._audio_paths: dict[str, str] = {}
+        self._embedded_track_id: str | None = None
 
         self.video_widget = QVideoWidget()
         self.video_widget.setMinimumHeight(260)
@@ -35,15 +64,9 @@ class PreviewPanel(QGroupBox):
         self.video_output = QAudioOutput()
         self.video_output.setVolume(1.0)
 
-        self.external_output = QAudioOutput()
-        self.external_output.setVolume(1.0)
-
         self.video_player = QMediaPlayer(self)
         self.video_player.setVideoOutput(self.video_widget)
         self.video_player.setAudioOutput(self.video_output)
-
-        self.external_player = QMediaPlayer(self)
-        self.external_player.setAudioOutput(self.external_output)
 
         self.play_pause_btn = QPushButton("Play")
         self.play_pause_btn.clicked.connect(self.toggle_play_pause)
@@ -78,20 +101,6 @@ class PreviewPanel(QGroupBox):
 
         self.time_label = QLabel("00:00 / 00:00")
 
-        self.video_volume = QSlider(Qt.Horizontal)
-        self.video_volume.setRange(0, 100)
-        self.video_volume.setValue(100)
-        self.video_volume.valueChanged.connect(
-            lambda value: self.video_output.setVolume(value / 100.0)
-        )
-
-        self.external_volume = QSlider(Qt.Horizontal)
-        self.external_volume.setRange(0, 100)
-        self.external_volume.setValue(100)
-        self.external_volume.valueChanged.connect(
-            lambda value: self.external_output.setVolume(value / 100.0)
-        )
-
         self.state_label = QLabel("Load files and run Sync to enable preview")
         self.play_pause_shortcut = QShortcut(QKeySequence(Qt.Key_Space), self)
         self.play_pause_shortcut.setContext(Qt.WidgetWithChildrenShortcut)
@@ -102,17 +111,18 @@ class PreviewPanel(QGroupBox):
         controls.addWidget(self.seek_slider, stretch=1)
         controls.addWidget(self.time_label)
 
-        volumes = QHBoxLayout()
-        volumes.addWidget(QLabel("Video audio (track 0)"))
-        volumes.addWidget(self.video_volume, stretch=1)
-        volumes.addSpacing(12)
-        volumes.addWidget(QLabel("External audio B (track 1)"))
-        volumes.addWidget(self.external_volume, stretch=1)
+        # Volume rows get rebuilt on every configure_tracks().
+        self._mixer_host = QWidget()
+        self._mixer_layout = QVBoxLayout()
+        self._mixer_layout.setContentsMargins(0, 0, 0, 0)
+        self._mixer_host.setLayout(self._mixer_layout)
+        self._volume_sliders: dict[str, QSlider] = {}
+        self._volume_rows: list[QWidget] = []
 
         root = QVBoxLayout()
         root.addWidget(self.video_widget)
         root.addLayout(controls)
-        root.addLayout(volumes)
+        root.addWidget(self._mixer_host)
         root.addWidget(self.state_label)
         self.setLayout(root)
 
@@ -122,59 +132,69 @@ class PreviewPanel(QGroupBox):
 
         self._sync_timer = QTimer(self)
         self._sync_timer.setInterval(60)
-        self._sync_timer.timeout.connect(self._sync_external_player)
+        self._sync_timer.timeout.connect(self._sync_audio_players)
 
         self.set_enabled(False)
 
-    def configure(
+    # ------------------------------------------------------------------
+    # Configuration
+
+    def configure_tracks(
         self,
         video_path: str,
-        audio_path: str,
-        offset_seconds: float,
+        tracks: list[TrackSpec],
+        *,
         trim_start: float | None = None,
         trim_end: float | None = None,
     ) -> None:
         self.stop()
 
         self.video_path = video_path
-        self.audio_path = audio_path
-        self.offset_ms = int(round(offset_seconds * 1000.0))
         self._trim_start_ms = int(trim_start * 1000) if trim_start is not None else None
         self._trim_end_ms = int(trim_end * 1000) if trim_end is not None else None
 
         self.video_player.setSource(QUrl.fromLocalFile(str(Path(video_path).resolve())))
-        self.external_player.setSource(QUrl.fromLocalFile(str(Path(audio_path).resolve())))
+
+        self._reset_audio_players()
+        self._rebuild_mixer(tracks)
 
         if self._trim_start_ms is not None:
             self.video_player.setPosition(self._trim_start_ms)
 
-        self.state_label.setText(f"Preview ready (offset: {offset_seconds:+.3f}s)")
+        self.state_label.setText(f"Preview ready ({len(tracks)} tracks)")
         self.set_enabled(True)
 
     def clear(self) -> None:
         self.stop()
         self.video_path = None
-        self.audio_path = None
-        self.offset_ms = 0
         self._trim_start_ms = None
         self._trim_end_ms = None
+        self._reset_audio_players()
+        self._rebuild_mixer([])
         self.video_player.setSource(QUrl())
-        self.external_player.setSource(QUrl())
         self.state_label.setText("Load files and run Sync to enable preview")
         self.seek_slider.setRange(0, 0)
         self.time_label.setText("00:00 / 00:00")
         self.set_enabled(False)
 
+    def volumes(self) -> dict[str, float]:
+        """Current per-track volume in [0.0, 1.0] keyed by track_id."""
+        return {tid: slider.value() / 100.0 for tid, slider in self._volume_sliders.items()}
+
+    # ------------------------------------------------------------------
+    # Playback control
+
     def set_enabled(self, enabled: bool) -> None:
         self.play_pause_btn.setEnabled(enabled)
         self.seek_slider.setEnabled(enabled)
-        self.video_volume.setEnabled(enabled)
-        self.external_volume.setEnabled(enabled)
+        for slider in self._volume_sliders.values():
+            slider.setEnabled(enabled)
 
     def toggle_play_pause(self) -> None:
         if self.video_player.playbackState() == QMediaPlayer.PlayingState:
             self.video_player.pause()
-            self.external_player.pause()
+            for p in self._audio_players.values():
+                p.pause()
             self._sync_timer.stop()
             return
 
@@ -185,7 +205,7 @@ class PreviewPanel(QGroupBox):
             self.video_player.setPosition(start)
 
         self.video_player.play()
-        self._sync_external_player(force=True)
+        self._sync_audio_players(force=True)
         self._sync_timer.start()
 
     def _on_space_pressed(self) -> None:
@@ -195,14 +215,18 @@ class PreviewPanel(QGroupBox):
     def stop(self) -> None:
         self._sync_timer.stop()
         self.video_player.stop()
-        self.external_player.stop()
+        for p in self._audio_players.values():
+            p.stop()
 
     def _seek_to(self, position_ms: int) -> None:
         start = self._trim_start_ms or 0
         end = self._trim_end_ms if self._trim_end_ms is not None else self.video_player.duration()
         position_ms = max(start, min(end, position_ms))
         self.video_player.setPosition(position_ms)
-        self._sync_external_player(force=True)
+        self._sync_audio_players(force=True)
+
+    # ------------------------------------------------------------------
+    # Video player callbacks
 
     def _on_duration_changed(self, duration_ms: int) -> None:
         start = self._trim_start_ms or 0
@@ -215,13 +239,13 @@ class PreviewPanel(QGroupBox):
         self._update_time_label(start, end)
 
     def _on_video_position_changed(self, position_ms: int) -> None:
-        # Auto-stop at trim end
         if self._trim_end_ms is not None:
             if (self.video_player.playbackState() == QMediaPlayer.PlayingState
                     and position_ms >= self._trim_end_ms):
                 self.video_player.pause()
                 self.video_player.setPosition(self._trim_end_ms)
-                self.external_player.pause()
+                for p in self._audio_players.values():
+                    p.pause()
                 self._sync_timer.stop()
                 position_ms = self._trim_end_ms
 
@@ -244,36 +268,116 @@ class PreviewPanel(QGroupBox):
         self.play_pause_btn.setText("Play")
         self._sync_timer.stop()
         if state == QMediaPlayer.StoppedState:
-            self.external_player.stop()
+            for p in self._audio_players.values():
+                p.stop()
         else:
-            self.external_player.pause()
+            for p in self._audio_players.values():
+                p.pause()
 
-    def _sync_external_player(self, force: bool = False) -> None:
-        if self.audio_path is None:
+    # ------------------------------------------------------------------
+    # Audio sync
+
+    def _sync_audio_players(self, force: bool = False) -> None:
+        if not self._audio_players:
             return
 
         video_pos = self.video_player.position()
-        target_external_pos = video_pos - self.offset_ms
+        video_playing = self.video_player.playbackState() == QMediaPlayer.PlayingState
 
-        if target_external_pos < 0:
-            if (
-                force
-                or self.external_player.playbackState() != QMediaPlayer.PausedState
-                or self.external_player.position() != 0
-            ):
-                self.external_player.pause()
-                self.external_player.setPosition(0)
-            return
+        for tid, player in self._audio_players.items():
+            target = video_pos - self._audio_offset_ms[tid]
 
-        drift_ms = abs(self.external_player.position() - target_external_pos)
-        if force or drift_ms > 80:
-            self.external_player.setPosition(target_external_pos)
+            if target < 0:
+                if (
+                    force
+                    or player.playbackState() != QMediaPlayer.PausedState
+                    or player.position() != 0
+                ):
+                    player.pause()
+                    player.setPosition(0)
+                continue
 
-        if self.video_player.playbackState() == QMediaPlayer.PlayingState:
-            if self.external_player.playbackState() != QMediaPlayer.PlayingState:
-                self.external_player.play()
-        elif self.external_player.playbackState() == QMediaPlayer.PlayingState:
-            self.external_player.pause()
+            drift_ms = abs(player.position() - target)
+            if force or drift_ms > 80:
+                player.setPosition(target)
+
+            if video_playing:
+                if player.playbackState() != QMediaPlayer.PlayingState:
+                    player.play()
+            elif player.playbackState() == QMediaPlayer.PlayingState:
+                player.pause()
+
+    # ------------------------------------------------------------------
+    # Internal helpers
+
+    def _reset_audio_players(self) -> None:
+        for p in self._audio_players.values():
+            p.stop()
+            p.setSource(QUrl())
+            p.setParent(None)
+            p.deleteLater()
+        self._audio_players.clear()
+        self._audio_outputs.clear()
+        self._audio_offset_ms.clear()
+        self._audio_paths.clear()
+        self._embedded_track_id = None
+
+    def _rebuild_mixer(self, tracks: list[TrackSpec]) -> None:
+        for row in self._volume_rows:
+            self._mixer_layout.removeWidget(row)
+            row.setParent(None)
+            row.deleteLater()
+        self._volume_rows.clear()
+        self._volume_sliders.clear()
+
+        for spec in tracks:
+            row = self._build_mixer_row(spec)
+            self._mixer_layout.addWidget(row)
+            self._volume_rows.append(row)
+
+            if spec.is_embedded:
+                self._embedded_track_id = spec.track_id
+                self.video_output.setVolume(spec.volume)
+                continue
+
+            assert spec.path is not None, "external track must have path"
+            output = QAudioOutput()
+            output.setVolume(spec.volume)
+            player = QMediaPlayer(self)
+            player.setAudioOutput(output)
+            player.setSource(QUrl.fromLocalFile(str(Path(spec.path).resolve())))
+            self._audio_outputs[spec.track_id] = output
+            self._audio_players[spec.track_id] = player
+            self._audio_offset_ms[spec.track_id] = int(round(spec.effective_offset_sec * 1000))
+            self._audio_paths[spec.track_id] = spec.path
+
+    def _build_mixer_row(self, spec: TrackSpec) -> QWidget:
+        row = QWidget()
+        layout = QHBoxLayout()
+        layout.setContentsMargins(0, 0, 0, 0)
+
+        label = QLabel(
+            f"{spec.display_name} [{'video' if spec.is_embedded else 'external'}]"
+        )
+        slider = QSlider(Qt.Horizontal)
+        slider.setRange(0, 100)
+        slider.setValue(int(round(spec.volume * 100)))
+
+        if spec.is_embedded:
+            slider.valueChanged.connect(
+                lambda v: self.video_output.setVolume(v / 100.0)
+            )
+        else:
+            tid = spec.track_id
+            slider.valueChanged.connect(
+                lambda v, _tid=tid: self._audio_outputs[_tid].setVolume(v / 100.0)
+            )
+
+        layout.addWidget(label)
+        layout.addWidget(slider, stretch=1)
+        row.setLayout(layout)
+        self._volume_sliders[spec.track_id] = slider
+        return row
 
     @staticmethod
     def _format_time(ms: int) -> str:
