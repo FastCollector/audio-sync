@@ -210,9 +210,11 @@ def main() -> int:
     _can_export = MainWindow._can_export  # type: ignore[attr-defined]
 
     fw = _FakeMainWindow(p)
+    # 6B relaxation: master != embedded is allowed as long as all offsets
+    # are filled. Gate now only requires fully-synced tracks.
     all_ok &= report(
-        "master != embedded → export blocked",
-        _can_export(fw) is False,
+        "master != embedded, all offsets filled → export OK (6B)",
+        _can_export(fw) is True,
         notes="master is ext1 here",
     )
 

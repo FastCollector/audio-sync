@@ -82,22 +82,6 @@ def test_missing_embedded_raises():
         build_export_cmd(p, "out.mp4", volumes={}, video_audio_indices=[1], ffmpeg="ffmpeg")
 
 
-def test_master_not_embedded_raises():
-    p, emb, _ = _make_project(externals=[("a", 0.0)])
-    # Swap master to external — violates Stage 3 scope.
-    ext = next(t for t in p.audio_tracks if t.source_kind is SourceKind.EXTERNAL)
-    p.set_master(ext.id)
-    with pytest.raises(InvalidProjectState):
-        build_export_cmd(p, "out.mp4", volumes={}, video_audio_indices=[1], ffmpeg="ffmpeg")
-
-
-def test_nonzero_video_offset_raises():
-    p, emb, _ = _make_project()
-    emb.offset_to_master = 0.5  # breaks invariant
-    with pytest.raises(InvalidProjectState):
-        build_export_cmd(p, "out.mp4", volumes={}, video_audio_indices=[1], ffmpeg="ffmpeg")
-
-
 def test_second_embedded_track_raises():
     p, emb, _ = _make_project()
     # Add an unlinked VIDEO_EMBEDDED track — not allowed by Stage 3 scope.
@@ -416,3 +400,172 @@ def test_parity_mkv_output(monkeypatch):
 
     legacy_normalized = [arg.replace("b_out", "ex0_out") for arg in legacy_cmd]
     assert new_cmd == legacy_normalized
+
+
+# ---------------------------------------------------------------------------
+# Stage 6B: non-zero video_offset_to_master triggers re-encode path
+
+
+def _make_reencode_project(
+    *,
+    video_offset: float,
+    externals: list[tuple[str, float]] | None = None,
+    trim_start: float | None = None,
+    trim_end: float | None = None,
+) -> tuple[Project, AudioTrack, list[AudioTrack]]:
+    p, emb, exts = _make_project(
+        externals=externals, trim_start=trim_start, trim_end=trim_end
+    )
+    emb.offset_to_master = video_offset
+    return p, emb, exts
+
+
+def test_positive_video_offset_uses_tpad():
+    p, emb, _ = _make_reencode_project(video_offset=0.5)
+    cmd = build_export_cmd(
+        p, "out.mp4",
+        volumes={emb.id: 1.0},
+        video_audio_indices=[1],
+        ffmpeg="ffmpeg",
+    )
+    filt = cmd[cmd.index("-filter_complex") + 1]
+    assert "[0:v]tpad=start_duration=0.500000:start_mode=add:color=black[v_out]" in filt
+    assert "trim=" not in filt.split(";")[0]
+
+
+def test_negative_video_offset_uses_trim_setpts():
+    p, emb, _ = _make_reencode_project(video_offset=-0.4)
+    cmd = build_export_cmd(
+        p, "out.mp4",
+        volumes={emb.id: 1.0},
+        video_audio_indices=[1],
+        ffmpeg="ffmpeg",
+    )
+    filt = cmd[cmd.index("-filter_complex") + 1]
+    assert "[0:v]trim=start=0.400000,setpts=PTS-STARTPTS[v_out]" in filt
+    assert "tpad" not in filt
+
+
+def test_reencode_uses_libx264():
+    p, emb, _ = _make_reencode_project(video_offset=0.5)
+    cmd = build_export_cmd(
+        p, "out.mp4",
+        volumes={emb.id: 1.0},
+        video_audio_indices=[1],
+        ffmpeg="ffmpeg",
+    )
+    assert cmd[cmd.index("-c:v") + 1] == "libx264"
+    assert cmd[cmd.index("-pix_fmt") + 1] == "yuv420p"
+    assert cmd[cmd.index("-c:a:0") + 1] == "aac"
+
+
+def test_reencode_maps_v_out_instead_of_0v():
+    p, emb, _ = _make_reencode_project(video_offset=0.5)
+    cmd = build_export_cmd(
+        p, "out.mp4",
+        volumes={emb.id: 1.0},
+        video_audio_indices=[1],
+        ffmpeg="ffmpeg",
+    )
+    mapped = [cmd[i + 1] for i, a in enumerate(cmd) if a == "-map"]
+    assert "0:v" not in mapped
+    assert "[v_out]" in mapped
+
+
+def test_reencode_no_input_side_ss():
+    p, emb, _ = _make_reencode_project(video_offset=0.5, trim_start=1.0, trim_end=5.0)
+    cmd = build_export_cmd(
+        p, "out.mp4",
+        volumes={emb.id: 1.0},
+        video_audio_indices=[1],
+        ffmpeg="ffmpeg",
+    )
+    i_idx = cmd.index("-i")
+    assert "-ss" not in cmd[:i_idx]
+    assert cmd[cmd.index("-t") + 1] == "4.0"
+
+
+def test_reencode_trim_applied_after_shift():
+    p, emb, _ = _make_reencode_project(video_offset=0.5, trim_start=1.0, trim_end=5.0)
+    cmd = build_export_cmd(
+        p, "out.mp4",
+        volumes={emb.id: 1.0},
+        video_audio_indices=[1],
+        ffmpeg="ffmpeg",
+    )
+    filt = cmd[cmd.index("-filter_complex") + 1]
+    video_chain = filt.split(";")[0]
+    assert video_chain.startswith("[0:v]tpad=start_duration=0.500000")
+    assert video_chain.endswith("[v_out]")
+    assert video_chain.index("tpad") < video_chain.index("trim=start=1.000000")
+    assert "trim=start=1.000000:end=5.000000" in video_chain
+    assert "setpts=PTS-STARTPTS" in video_chain
+
+
+def test_reencode_embedded_audio_shifted():
+    p, emb, _ = _make_reencode_project(video_offset=0.5)
+    cmd = build_export_cmd(
+        p, "out.mp4",
+        volumes={emb.id: 1.0},
+        video_audio_indices=[1],
+        ffmpeg="ffmpeg",
+    )
+    filt = cmd[cmd.index("-filter_complex") + 1]
+    assert "[0:1]volume=1.000000,adelay=500:all=1[va0_out]" in filt
+
+
+def test_reencode_embedded_audio_negative_offset_atrim():
+    p, emb, _ = _make_reencode_project(video_offset=-0.4)
+    cmd = build_export_cmd(
+        p, "out.mp4",
+        volumes={emb.id: 1.0},
+        video_audio_indices=[1],
+        ffmpeg="ffmpeg",
+    )
+    filt = cmd[cmd.index("-filter_complex") + 1]
+    assert "[0:1]volume=1.000000,atrim=start=0.400000,asetpts=PTS-STARTPTS[va0_out]" in filt
+
+
+def test_reencode_external_offset_math_unchanged():
+    p, emb, (a,) = _make_reencode_project(
+        video_offset=0.5,
+        externals=[("a", 0.25)],
+        trim_start=0.10,
+    )
+    cmd = build_export_cmd(
+        p, "out.mp4",
+        volumes={emb.id: 1.0, a.id: 1.0},
+        video_audio_indices=[1],
+        ffmpeg="ffmpeg",
+    )
+    filt = cmd[cmd.index("-filter_complex") + 1]
+    assert "adelay=150:all=1" in filt
+
+
+def test_zero_offset_path_unchanged_by_6b():
+    p, emb, _ = _make_project()
+    cmd = build_export_cmd(
+        p, "out.mp4",
+        volumes={emb.id: 1.0},
+        video_audio_indices=[1],
+        ffmpeg="ffmpeg",
+    )
+    assert cmd[cmd.index("-c:v") + 1] == "copy"
+    assert "[v_out]" not in cmd
+    assert "libx264" not in cmd
+
+
+def test_master_external_with_synced_embedded_triggers_reencode():
+    # Master is external and embedded has a computed offset → re-encode path.
+    p, emb, (a,) = _make_project(externals=[("a", 0.0)])
+    p.set_master(a.id)
+    emb.offset_to_master = -0.3
+    cmd = build_export_cmd(
+        p, "out.mp4",
+        volumes={emb.id: 1.0, a.id: 1.0},
+        video_audio_indices=[1],
+        ffmpeg="ffmpeg",
+    )
+    assert cmd[cmd.index("-c:v") + 1] == "libx264"
+    filt = cmd[cmd.index("-filter_complex") + 1]
+    assert "[0:v]trim=start=0.300000,setpts=PTS-STARTPTS[v_out]" in filt

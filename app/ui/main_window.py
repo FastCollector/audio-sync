@@ -283,7 +283,7 @@ class MainWindow(QMainWindow):
         if not self._can_export():
             QMessageBox.warning(
                 self, "Export Blocked",
-                "Switch master back to video audio to export (coming in 6B).",
+                "All tracks must be synced before exporting.",
             )
             return
 
@@ -457,7 +457,7 @@ class MainWindow(QMainWindow):
         self.export_panel.export_button.setEnabled(export_ok)
         self.export_panel.export_button.setToolTip(
             "" if export_ok
-            else "Switch master back to video audio to export (coming in 6B)"
+            else "Sync all tracks before exporting."
         )
 
     def _can_export(self) -> bool:
@@ -466,8 +466,6 @@ class MainWindow(QMainWindow):
             return False
         embedded = project.embedded_audio_track()
         if embedded is None:
-            return False
-        if project.master_track_id != embedded.id:
             return False
         if any(
             t.offset_to_master is None
